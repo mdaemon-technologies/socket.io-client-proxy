@@ -1,4 +1,4 @@
-[![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmdaemon-technologies%2Fsocket-client-proxy%2Fmaster%2Fpackage.json&query=%24.version&prefix=v&label=npm&color=blue)](https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy) [![Static Badge](https://img.shields.io/badge/node-v18%2B-blue?style=flat&label=node&color=blue)](https://nodejs.org) [![install size](https://packagephobia.com/badge?p=@mdaemon/socket.io-client-proxy)](https://packagephobia.com/result?p=@mdaemon/socket.io-client-proxy) [![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmdaemon-technologies%2Fsocket-client-proxy%2Fmaster%2Fpackage.json&query=%24.license&prefix=v&label=license&color=green)](https://github.com/mdaemon-technologies/socket-client-proxy/blob/master/LICENSE)
+[![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmdaemon-technologies%2Fsocket-client-proxy%2Fmain%2Fpackage.json&query=%24.version&prefix=v&label=npm&color=blue)](https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy) [![Static Badge](https://img.shields.io/badge/node-v18%2B-blue?style=flat&label=node&color=blue)](https://nodejs.org) [![install size](https://packagephobia.com/badge?p=@mdaemon/socket.io-client-proxy)](https://packagephobia.com/result?p=@mdaemon/socket.io-client-proxy) [![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmdaemon-technologies%2Fsocket-client-proxy%2Fmain%2Fpackage.json&query=%24.license&prefix=v&label=license&color=green)](https://github.com/mdaemon-technologies/socket-client-proxy/blob/main/LICENSE)
 
 # @mdaemon/socket.io-client-proxy
 
@@ -198,7 +198,7 @@ proxy.directChannelEmit("local-update", { cached: true, data: payload });
 
 ## License
 
-Published under the [LGPL-3.0-or-later license](https://github.com/mdaemon-technologies/socket-client-proxy/blob/master/LICENSE "LGPL-3.0-or-later").
+Published under the [LGPL-3.0-or-later license](https://github.com/mdaemon-technologies/socket-client-proxy/blob/main/LICENSE "LGPL-3.0-or-later").
 
 Published by
 **MDaemon Technologies, Ltd.**

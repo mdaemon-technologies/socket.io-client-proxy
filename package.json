@@ -1,6 +1,6 @@
 {
   "name": "@mdaemon/socket.io-client-proxy",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A socket.io-client proxy using BroadcastChannel to allow multiple browser tabs to use the same socket connection",
   "type": "module",
   "main": "dist/socket-io-proxy.umd.js",
