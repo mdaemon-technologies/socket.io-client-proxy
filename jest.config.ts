@@ -8,6 +8,9 @@ const config: Config.InitialOptions = {
     "^.+\\.ts?$": "ts-jest"
   },
   testEnvironment: 'jsdom',
+  // Only *.test.ts are suites; helpers/ holds shared harness code.
+  testMatch: ["<rootDir>/src/**/__tests__/**/*.test.ts"],
+  setupFiles: ["<rootDir>/src/__tests__/helpers/setup.ts"],
   testPathIgnorePatterns: [
     "<rootDir>/dist/",
     "<rootDir>/public/",

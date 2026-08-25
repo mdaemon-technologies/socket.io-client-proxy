@@ -9,7 +9,12 @@ export default [
     external: ['socket.io-client'],
     output: [
       { file: pkg.module, format: 'es', exports: "default" },
-      { file: pkg.browser, format: 'umd', exports: "default", name: "SocketIOProxy", globals: { 'socket.io-client': 'io' } }
+      // Browser <script> build. Keeps the .js extension the README documents.
+      { file: pkg.browser, format: 'umd', exports: "default", name: "SocketIOProxy", globals: { 'socket.io-client': 'io' } },
+      // require() build. The package is "type": "module", so Node parses a .js
+      // file as ESM and the UMD wrapper's CommonJS branch never runs — the
+      // extension has to be .cjs for require() to return the class.
+      { file: pkg.main, format: 'umd', exports: "default", name: "SocketIOProxy", globals: { 'socket.io-client': 'io' } }
     ],
     plugins: [
       nodeResolve(),
