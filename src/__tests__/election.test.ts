@@ -1,4 +1,5 @@
 import SocketIOProxy from '../socket-io-proxy';
+import { io } from 'socket.io-client';
 import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
 import {
   Harness,
@@ -9,6 +10,10 @@ import {
   joinAsSecondary,
   msg,
   primaryAlive,
+  primaryClaim,
+  heartbeat,
+  epochOf,
+  connectionState,
 } from './helpers/harness';
 
 jest.mock('socket.io-client');
@@ -58,7 +63,9 @@ describe('election, failover and teardown', () => {
       h.mockChannel.postMessage.mockClear();
       jest.advanceTimersByTime(3000);
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'HEARTBEAT', data: { tabId: tabIdOf(socketProxy) } })
+        expect.objectContaining({
+          type: 'HEARTBEAT', data: { tabId: tabIdOf(socketProxy), epoch: epochOf(socketProxy) },
+        })
       );
     });
 
@@ -93,7 +100,7 @@ describe('election, failover and teardown', () => {
       // A heartbeat every 5s keeps the 10s timeout from ever elapsing.
       for (let i = 0; i < 6; i++) {
         jest.advanceTimersByTime(5000);
-        h.mockChannel.onmessage(msg(socketProxy, { type: 'HEARTBEAT', data: { tabId: 'ff'.repeat(24) } }));
+        h.mockChannel.onmessage(heartbeat(socketProxy));
       }
 
       expect(socketProxy.isPrimary).toBe(false);
@@ -158,14 +165,16 @@ describe('election, failover and teardown', () => {
 
     test('broadcasts PRIMARY_CLAIM on becoming primary', () => {
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'PRIMARY_CLAIM', data: { tabId: tabIdOf(socketProxy) } })
+        expect.objectContaining({
+          type: 'PRIMARY_CLAIM', data: { tabId: tabIdOf(socketProxy), epoch: epochOf(socketProxy) },
+        })
       );
     });
 
     test('yields to a higher tabId on PRIMARY_CLAIM', () => {
       expect(socketProxy.isPrimary).toBe(true);
 
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CLAIM', data: { tabId: 'zz'.repeat(24) } }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
       expect(socketProxy.isPrimary).toBe(false);
       expect(h.mockSocket.disconnect).toHaveBeenCalled();
     });
@@ -175,7 +184,7 @@ describe('election, failover and teardown', () => {
       h.mockChannel.postMessage.mockClear();
 
       const lowerTabId = '00'.repeat(24);
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CLAIM', data: { tabId: lowerTabId } }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: lowerTabId, epoch: epochOf(socketProxy) }));
 
       expect(socketProxy.isPrimary).toBe(true);
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
@@ -200,13 +209,15 @@ describe('election, failover and teardown', () => {
 
     test('a heartbeat from another primary triggers reconciliation', () => {
       // Backstop in case a PRIMARY_CLAIM is missed: the next heartbeat resolves it.
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'HEARTBEAT', data: { tabId: 'zz'.repeat(24) } }));
+      h.mockChannel.onmessage(heartbeat(socketProxy, {
+        tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy),
+      }));
       expect(socketProxy.isPrimary).toBe(false);
     });
 
     test('a PRIMARY_ALIVE from another primary triggers reconciliation', () => {
       h.mockChannel.onmessage(primaryAlive(socketProxy, {
-        tabId: 'zz'.repeat(24), connected: true, active: true, id: 'x',
+        tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy), connected: true, active: true, id: 'x',
       }));
       expect(socketProxy.isPrimary).toBe(false);
     });
@@ -218,7 +229,7 @@ describe('election, failover and teardown', () => {
       (socketProxy as any).isConnected = true;
 
       h.mockChannel.onmessage(primaryAlive(socketProxy, {
-        tabId: '00'.repeat(24), connected: false, active: false, id: 'theirs',
+        tabId: '00'.repeat(24), epoch: epochOf(socketProxy), connected: false, active: false, id: 'theirs',
       }));
 
       expect(socketProxy.isPrimary).toBe(true);
@@ -230,7 +241,7 @@ describe('election, failover and teardown', () => {
       const callback = jest.fn();
       socketProxy.on('kept', callback);
 
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CLAIM', data: { tabId: 'zz'.repeat(24) } }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
       expect(socketProxy.isPrimary).toBe(false);
 
       h.mockChannel.onmessage(msg(socketProxy, { type: 'EVENT', data: { event: 'kept', args: ['still here'] } }));
@@ -238,11 +249,11 @@ describe('election, failover and teardown', () => {
     });
 
     test('a demoted tab still accepts traffic from the winner', () => {
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CLAIM', data: { tabId: 'zz'.repeat(24) } }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
 
       // The channel tag is shared, so there is no blackout while the demoted
       // tab waits to re-learn a token.
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'SOCKET_ID_UPDATE', data: { id: 'winner-id' } }));
+      h.mockChannel.onmessage(connectionState(socketProxy, { id: 'winner-id' }));
       expect(socketProxy.id).toBe('winner-id');
     });
 
@@ -251,7 +262,7 @@ describe('election, failover and teardown', () => {
       // one this tab let go of must never be relayed as if it still owned it.
       const onAnyHandler = h.mockSocket.onAny.mock.calls[0][0] as (...args: any[]) => void;
 
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CLAIM', data: { tabId: 'zz'.repeat(24) } }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
       expect(socketProxy.isPrimary).toBe(false);
 
       const local = jest.fn();
@@ -265,9 +276,145 @@ describe('election, failover and teardown', () => {
     });
 
     test('a demoted tab starts monitoring the winner heartbeat', () => {
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CLAIM', data: { tabId: 'zz'.repeat(24) } }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
       expect((socketProxy as any).heartbeatMonitorTimer).not.toBeNull();
       expect((socketProxy as any).heartbeatTimer).toBeNull();
+    });
+  });
+
+  describe('forcePrimary', () => {
+    function lastPosted(type: string) {
+      return h.mockChannel.postMessage.mock.calls
+        .map((c: any[]) => c[0])
+        .reverse()
+        .find((m: any) => m.type === type);
+    }
+
+    test('resolves immediately when this tab is already primary', async () => {
+      await electAsPrimary(socketProxy);
+      h.mockChannel.postMessage.mockClear();
+
+      await socketProxy.forcePrimary();
+
+      expect(socketProxy.isPrimary).toBe(true);
+      expect(lastPosted('PRIMARY_DEMAND')).toBeUndefined();
+    });
+
+    test('broadcasts a demand and promotes when nobody answers', async () => {
+      const promise = socketProxy.forcePrimary();
+      expect(lastPosted('PRIMARY_DEMAND')).toEqual(
+        expect.objectContaining({ data: { tabId: tabIdOf(socketProxy) } })
+      );
+
+      expect(socketProxy.isPrimary).toBe(false);
+      jest.advanceTimersByTime(2000);
+      await promise;
+
+      expect(socketProxy.isPrimary).toBe(true);
+    });
+
+    test('promotes as soon as the old primary stands down', async () => {
+      const promise = socketProxy.forcePrimary();
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'PRIMARY_STOOD_DOWN', data: { tabId: tabIdOf(socketProxy) },
+      }));
+
+      await promise;
+      expect(socketProxy.isPrimary).toBe(true);
+    });
+
+    test('ignores a stand-down addressed to another tab', async () => {
+      const promise = socketProxy.forcePrimary();
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'PRIMARY_STOOD_DOWN', data: { tabId: 'someone-else' },
+      }));
+      expect(socketProxy.isPrimary).toBe(false);
+
+      jest.advanceTimersByTime(2000);
+      await promise;
+      expect(socketProxy.isPrimary).toBe(true);
+    });
+
+    test('concurrent calls share one demand and one promise', async () => {
+      const a = socketProxy.forcePrimary();
+      const b = socketProxy.forcePrimary();
+
+      const demands = h.mockChannel.postMessage.mock.calls
+        .map((c: any[]) => c[0])
+        .filter((m: any) => m.type === 'PRIMARY_DEMAND');
+      expect(demands).toHaveLength(1);
+
+      jest.advanceTimersByTime(2000);
+      await Promise.all([a, b]);
+      expect(socketProxy.isPrimary).toBe(true);
+      expect(io).toHaveBeenCalledTimes(1);
+    });
+
+    test('listeners registered before promotion still fire afterwards', async () => {
+      const callback = jest.fn();
+      socketProxy.on('kept', callback);
+
+      const promise = socketProxy.forcePrimary();
+      jest.advanceTimersByTime(2000);
+      await promise;
+
+      const onAnyHandler = h.mockSocket.onAny.mock.calls[0][0] as (...args: any[]) => void;
+      onAnyHandler('kept', 'still here');
+      expect(callback).toHaveBeenCalledWith('still here');
+    });
+
+    test('the promotion outranks a stale primary holding a higher tabId', async () => {
+      // The whole point of the epoch: tabId alone would let the stale tab win
+      // the tie-break and undo the forced promotion.
+      const promise = socketProxy.forcePrimary();
+      jest.advanceTimersByTime(2000);
+      await promise;
+      expect(socketProxy.isPrimary).toBe(true);
+
+      h.mockChannel.postMessage.mockClear();
+      h.mockChannel.onmessage(primaryClaim(socketProxy, {
+        tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) - 1,
+      }));
+
+      expect(socketProxy.isPrimary).toBe(true);
+      expect(lastPosted('PRIMARY_YIELD')).toEqual(
+        expect.objectContaining({ data: { tabId: 'zz'.repeat(24) } })
+      );
+    });
+
+    test('a primary stands down on a demand and says so', async () => {
+      await electAsPrimary(socketProxy);
+      h.mockChannel.postMessage.mockClear();
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'PRIMARY_DEMAND', data: { tabId: 'zz'.repeat(24) },
+      }));
+
+      expect(socketProxy.isPrimary).toBe(false);
+      expect(h.mockSocket.disconnect).toHaveBeenCalled();
+      expect(lastPosted('PRIMARY_STOOD_DOWN')).toEqual(
+        expect.objectContaining({ data: { tabId: 'zz'.repeat(24) } })
+      );
+    });
+
+    test('a tab that stood down does not immediately re-elect itself', async () => {
+      await electAsPrimary(socketProxy);
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'PRIMARY_DEMAND', data: { tabId: 'zz'.repeat(24) },
+      }));
+      h.mockChannel.postMessage.mockClear();
+
+      // It waits out the heartbeat timeout like any other secondary.
+      jest.advanceTimersByTime(2500);
+      expect(socketProxy.isPrimary).toBe(false);
+      expect(lastPosted('PRIMARY_CHECK')).toBeUndefined();
+    });
+
+    test('rejects after closeChannel', async () => {
+      socketProxy.closeChannel();
+      await expect(socketProxy.forcePrimary()).rejects.toThrow('after closeChannel() has been called');
     });
   });
 

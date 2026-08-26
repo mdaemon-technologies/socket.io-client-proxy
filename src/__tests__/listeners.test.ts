@@ -350,11 +350,13 @@ describe('listeners and inter-tab messaging', () => {
       );
     });
 
-    test('also dispatches to the calling tab own listeners', () => {
+    test('does not dispatch to the calling tab own listeners', () => {
+      // Sender-excluded, as in 1.0.x: 1.1.0 briefly dispatched locally, which
+      // made an emit()+directChannelEmit() pairing re-enter the emitter.
       const callback = jest.fn();
       socketProxy.on('custom-event', callback);
       socketProxy.directChannelEmit('custom-event', 'payload');
-      expect(callback).toHaveBeenCalledWith('payload');
+      expect(callback).not.toHaveBeenCalled();
     });
   });
 });

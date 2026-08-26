@@ -9,6 +9,7 @@ import {
   electAsPrimary,
   joinAsSecondary,
   respondAsPrimary,
+  connectionState,
 } from './helpers/harness';
 
 jest.mock('socket.io-client');
@@ -110,6 +111,175 @@ describe('construction and initialization', () => {
 
     test('channelName exposes the effective channel', () => {
       expect(socketProxy.channelName).toContain('test-channel#');
+    });
+  });
+
+  describe('channelNameFor', () => {
+    test('agrees with an actual instance', () => {
+      const options = { auth: { token: 'abc' }, transports: ['websocket'] as any };
+      const proxy = new SocketIOProxy('app', 'ws://host', options);
+      expect(SocketIOProxy.channelNameFor('app', 'ws://host', options)).toBe(proxy.channelName);
+    });
+
+    test('lets two call sites be compared without constructing anything', () => {
+      // The assertion that turns a silent runtime split into a failing test.
+      const shared = SocketIOProxy.channelNameFor('rtc', 'ws://host', { auth: { user: 'u', token: 't' } });
+      const same = SocketIOProxy.channelNameFor('rtc', 'ws://host', { auth: { token: 't', user: 'u' } });
+      const drifted = SocketIOProxy.channelNameFor('rtc', 'ws://host', { auth: { user: 'u' } });
+
+      expect(same).toBe(shared);
+      expect(drifted).not.toBe(shared);
+    });
+
+    test('opens no channel', () => {
+      (globalThis.BroadcastChannel as jest.Mock).mockClear();
+      SocketIOProxy.channelNameFor('app', 'ws://host');
+      expect(globalThis.BroadcastChannel).not.toHaveBeenCalled();
+    });
+
+    test('honours isolateByAuth: false', () => {
+      expect(SocketIOProxy.channelNameFor('app', 'ws://host', { isolateByAuth: false })).toBe('app');
+    });
+
+    test('validates its arguments like the constructor', () => {
+      expect(() => SocketIOProxy.channelNameFor('', 'ws://host')).toThrow('channelId is required');
+      expect(() => SocketIOProxy.channelNameFor('app', '')).toThrow('url is required');
+    });
+  });
+
+  describe('identity mismatch diagnostics', () => {
+    const LOBBY = '::sioproxy-identity';
+
+    /** An announcement from a peer tab, as it would arrive on the lobby. */
+    function announce(keys: string[], fingerprint = 'different-fingerprint', kind = 'announce') {
+      return { data: { kind, tabId: 'peer-tab', fingerprint, keys } };
+    }
+
+    test('announces itself on a lobby keyed by the RAW channel id', () => {
+      const proxy = new SocketIOProxy('rtc', 'ws://host', { auth: { user: 'u', token: 't' } });
+
+      expect(globalThis.BroadcastChannel).toHaveBeenCalledWith('rtc' + LOBBY);
+      expect(h.lobbyChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: 'announce',
+          fingerprint: expect.any(String),
+          keys: ['auth.token', 'auth.user', 'url'],
+        })
+      );
+      // Values must never leave the tab; only key paths do.
+      const posted = h.lobbyChannel.postMessage.mock.calls[0][0] as any;
+      expect(JSON.stringify(posted)).not.toContain('"t"');
+      void proxy;
+    });
+
+    test('warns when a peer describes its identity with different keys', () => {
+      // The classic drift: one call site passes displayName, the other omits it.
+      new SocketIOProxy('rtc', 'ws://host', { auth: { user: 'u', token: 't' } });
+      h.lobbyChannel.onmessage(announce(['auth.displayName', 'auth.token', 'auth.user', 'url']));
+
+      expect(h.warn).toHaveBeenCalledTimes(1);
+      const text = h.warn.mock.calls[0].join(' ');
+      expect(text).toContain('"rtc"');
+      expect(text).toContain('auth.displayName');
+      expect(text).toContain('channelNameFor');
+    });
+
+    test('stays silent when only the values differ — that is two users', () => {
+      // Same key shape, different fingerprint: exactly what the isolation is
+      // for, so warning here would make the library cry wolf.
+      new SocketIOProxy('rtc', 'ws://host', { auth: { user: 'a', token: 't' } });
+      h.lobbyChannel.onmessage(announce(['auth.token', 'auth.user', 'url']));
+
+      expect(h.warn).not.toHaveBeenCalled();
+    });
+
+    test('stays silent for a peer with the same identity', () => {
+      const proxy = new SocketIOProxy('rtc', 'ws://host', { auth: { user: 'u', token: 't' } });
+      const fingerprint = (proxy as any).identityFingerprint;
+      h.lobbyChannel.onmessage(announce(['auth.token', 'auth.user', 'url'], fingerprint));
+
+      expect(h.warn).not.toHaveBeenCalled();
+    });
+
+    test('warns once per distinct mismatch, however many peers repeat it', () => {
+      new SocketIOProxy('rtc', 'ws://host', { auth: { user: 'u', token: 't' } });
+      const peer = ['auth.displayName', 'auth.token', 'auth.user', 'url'];
+
+      h.lobbyChannel.onmessage(announce(peer));
+      h.lobbyChannel.onmessage(announce(peer));
+      h.lobbyChannel.onmessage(announce(peer, 'yet-another-fingerprint'));
+
+      expect(h.warn).toHaveBeenCalledTimes(1);
+    });
+
+    test('answers an announcement so the newcomer learns about this tab', () => {
+      new SocketIOProxy('rtc', 'ws://host');
+      h.lobbyChannel.postMessage.mockClear();
+
+      h.lobbyChannel.onmessage(announce(['url']));
+      expect(h.lobbyChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'reply' })
+      );
+    });
+
+    test('never answers a reply, so the exchange cannot ping-pong', () => {
+      new SocketIOProxy('rtc', 'ws://host');
+      h.lobbyChannel.postMessage.mockClear();
+
+      h.lobbyChannel.onmessage(announce(['url'], 'different-fingerprint', 'reply'));
+      expect(h.lobbyChannel.postMessage).not.toHaveBeenCalled();
+    });
+
+    test('ignores its own announcement echoed back', () => {
+      const proxy = new SocketIOProxy('rtc', 'ws://host');
+      h.lobbyChannel.postMessage.mockClear();
+
+      h.lobbyChannel.onmessage({
+        data: { kind: 'announce', tabId: (proxy as any).tabId, fingerprint: 'x', keys: [] },
+      });
+      expect(h.warn).not.toHaveBeenCalled();
+      expect(h.lobbyChannel.postMessage).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['not an object', 'nonsense'],
+      ['an unknown kind', { kind: 'gossip', tabId: 'p', fingerprint: 'f', keys: [] }],
+      ['a missing tabId', { kind: 'announce', fingerprint: 'f', keys: [] }],
+      ['non-string keys', { kind: 'announce', tabId: 'p', fingerprint: 'f', keys: [1, 2] }],
+      ['keys that are not an array', { kind: 'announce', tabId: 'p', fingerprint: 'f', keys: 'url' }],
+    ])('ignores a malformed announcement: %s', (_label, payload) => {
+      new SocketIOProxy('rtc', 'ws://host');
+      expect(() => h.lobbyChannel.onmessage({ data: payload })).not.toThrow();
+      expect(h.warn).not.toHaveBeenCalled();
+    });
+
+    test('warnOnIdentityMismatch: false opens no lobby at all', () => {
+      (globalThis.BroadcastChannel as jest.Mock).mockClear();
+      new SocketIOProxy('rtc', 'ws://host', { warnOnIdentityMismatch: false });
+
+      const names = (globalThis.BroadcastChannel as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+      expect(names.some((n: string) => n.endsWith(LOBBY))).toBe(false);
+    });
+
+    test('isolateByAuth: false opens no lobby either', () => {
+      // Nothing to detect: every tab uses the channel id verbatim.
+      (globalThis.BroadcastChannel as jest.Mock).mockClear();
+      new SocketIOProxy('rtc', 'ws://host', { isolateByAuth: false });
+
+      const names = (globalThis.BroadcastChannel as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+      expect(names.some((n: string) => n.endsWith(LOBBY))).toBe(false);
+    });
+
+    test('closeChannel closes the lobby too', () => {
+      const proxy = new SocketIOProxy('rtc', 'ws://host');
+      proxy.closeChannel();
+      expect(h.lobbyChannel.close).toHaveBeenCalled();
+      expect(h.lobbyChannel.onmessage).toBeNull();
+    });
+
+    test('a lobby that cannot be posted to does not break the proxy', () => {
+      h.lobbyChannel.postMessage.mockImplementation(() => { throw new Error('InvalidStateError'); });
+      expect(() => new SocketIOProxy('rtc', 'ws://host')).not.toThrow();
     });
   });
 
@@ -272,6 +442,20 @@ describe('construction and initialization', () => {
       expect(callback).toHaveBeenCalledWith('x');
     });
 
+    test('adopting state during the handshake does not fire the event', async () => {
+      // It lands mid-initialize(), before the caller could have subscribed; the
+      // getters carry it the moment initialize() resolves.
+      const fresh = new SocketIOProxy('quiet-channel', 'ws://test-url');
+      const listener = jest.fn();
+      fresh.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+
+      await joinAsSecondary(h.mockChannel, fresh, { connected: true, active: true, id: 'live-id' });
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(fresh.connected).toBe(true);
+      expect(fresh.id).toBe('live-id');
+    });
+
     test('adopts the primary state carried by PRIMARY_ALIVE', async () => {
       const fresh = new SocketIOProxy('state-channel', 'ws://test-url');
       await joinAsSecondary(h.mockChannel, fresh, { connected: true, active: true, id: 'live-id' });
@@ -280,6 +464,60 @@ describe('construction and initialization', () => {
       expect(fresh.connected).toBe(true);
       expect(fresh.active).toBe(true);
       expect(fresh.id).toBe('live-id');
+    });
+  });
+
+  describe('connection intent', () => {
+    test('defaults to connected', () => {
+      expect(socketProxy.wantsConnection).toBe(true);
+    });
+
+    test('autoConnect: false seeds it disconnected', () => {
+      const deferred = new SocketIOProxy('deferred', 'ws://test-url', { autoConnect: false });
+      expect(deferred.wantsConnection).toBe(false);
+    });
+
+    test('autoConnect is still handed to socket.io', async () => {
+      const deferred = new SocketIOProxy('deferred', 'ws://test-url', { autoConnect: false });
+      await electAsPrimary(deferred);
+
+      expect(io).toHaveBeenCalledWith(
+        'ws://test-url',
+        expect.objectContaining({ autoConnect: false })
+      );
+    });
+
+    test('promotion does not open a socket nobody asked for', async () => {
+      const deferred = new SocketIOProxy('deferred', 'ws://test-url', { autoConnect: false });
+      await electAsPrimary(deferred);
+
+      expect(deferred.isPrimary).toBe(true);
+      expect(h.mockSocket.connect).not.toHaveBeenCalled();
+      expect(deferred.connected).toBe(false);
+    });
+
+    test('promotion opens the socket once the intent is there', async () => {
+      const deferred = new SocketIOProxy('deferred', 'ws://test-url', { autoConnect: false });
+      await electAsPrimary(deferred);
+      expect(h.mockSocket.connect).not.toHaveBeenCalled();
+
+      deferred.connect();
+
+      expect(h.mockSocket.connect).toHaveBeenCalled();
+      expect(deferred.wantsConnection).toBe(true);
+    });
+
+    test('closes a socket a cached Manager opened against the channel wishes', async () => {
+      // io() caches Managers by url, so a Manager built elsewhere with
+      // autoConnect true will open this socket no matter what we pass.
+      (io as jest.Mock).mockImplementation(() => h.mockSocket);
+      h.mockSocket.connected = true;
+      h.mockSocket.active = true;
+
+      const deferred = new SocketIOProxy('deferred', 'ws://test-url', { autoConnect: false });
+      await electAsPrimary(deferred);
+
+      expect(h.mockSocket.disconnect).toHaveBeenCalled();
     });
   });
 
@@ -320,15 +558,11 @@ describe('construction and initialization', () => {
     test('connected and disconnected stay opposites', async () => {
       await electAsPrimary(socketProxy);
 
-      h.mockChannel.onmessage({
-        data: { type: 'CONNECTION_STATUS', data: { connected: true }, token: getToken(socketProxy) },
-      });
+      h.mockChannel.onmessage(connectionState(socketProxy, { connected: true }));
       expect(socketProxy.connected).toBe(true);
       expect(socketProxy.disconnected).toBe(false);
 
-      h.mockChannel.onmessage({
-        data: { type: 'CONNECTION_STATUS', data: { connected: false }, token: getToken(socketProxy) },
-      });
+      h.mockChannel.onmessage(connectionState(socketProxy, { connected: false }));
       expect(socketProxy.connected).toBe(false);
       expect(socketProxy.disconnected).toBe(true);
     });
@@ -346,7 +580,8 @@ describe('construction and initialization', () => {
       const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
       await electAsPrimary(debugProxy);
 
-      expect(logSpy).toHaveBeenCalledWith('[SocketIOProxy]', expect.anything(), expect.anything());
+      const logged = logSpy.mock.calls.map((c: any[]) => c.join(' '));
+      expect(logged.some((line: string) => line.includes('Became primary'))).toBe(true);
     });
 
     test('logs rejected messages when debug is enabled', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@mdaemon/socket.io-client-proxy",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "A socket.io-client proxy using BroadcastChannel to allow multiple browser tabs to use the same socket connection",
   "type": "module",
   "main": "dist/socket-io-proxy.umd.cjs",
@@ -13,8 +13,8 @@
   "scripts": {
     "build": "rollup -c",
     "dev": "rollup -c -w",
-    "test": "jest",
-    "watch": "jest --watchAll",
+    "test": "node --stack-size=2000 node_modules/jest/bin/jest.js",
+    "watch": "node --stack-size=2000 node_modules/jest/bin/jest.js --watchAll",
     "pub": "npm run build && npm run test && npm publish"
   },
   "repository": {
@@ -25,7 +25,10 @@
     "socket.io",
     "broadcast-channel",
     "browser",
-    "tabs"
+    "tabs",
+    "socket.io-client",
+    "proxy",
+    "websockets"
   ],
   "author": {
     "name": "MDaemon Technologies, Ltd.",

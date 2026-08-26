@@ -60,6 +60,112 @@ describe('emit and emitWithAck', () => {
     });
   });
 
+  describe('peers() — emit that also notifies sibling tabs', () => {
+    test('is chainable', async () => {
+      await electAsPrimary(socketProxy);
+      expect(socketProxy.peers()).toBe(socketProxy);
+    });
+
+    test('a secondary sends one message that does both jobs', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+
+      socketProxy.peers().emit('leave-room', 'room-1');
+
+      expect(h.mockChannel.postMessage).toHaveBeenCalledTimes(1);
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'EMIT',
+          data: { event: 'leave-room', args: ['room-1'], notifyPeers: true },
+        })
+      );
+    });
+
+    test('the emitting tab does not receive its own event', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+
+      const callback = jest.fn();
+      socketProxy.on('leave-room', callback);
+      socketProxy.peers().emit('leave-room', 'room-1');
+
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    test('a receiving tab hands it to ordinary on() listeners', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+
+      const callback = jest.fn();
+      socketProxy.on('set-user-status', callback);
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'EMIT', data: { event: 'set-user-status', args: ['away'], notifyPeers: true },
+      }));
+      expect(callback).toHaveBeenCalledWith('away');
+    });
+
+    test('the primary relays it to the server and to its own listeners', async () => {
+      await electAsPrimary(socketProxy);
+
+      const callback = jest.fn();
+      socketProxy.on('invite-to-call', callback);
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'EMIT', data: { event: 'invite-to-call', args: ['bob'], notifyPeers: true },
+      }));
+
+      expect(h.mockSocket.emit).toHaveBeenCalledWith('invite-to-call', 'bob');
+      expect(callback).toHaveBeenCalledWith('bob');
+    });
+
+    test('a plain EMIT is not handed to listeners', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+
+      const callback = jest.fn();
+      socketProxy.on('plain', callback);
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'EMIT', data: { event: 'plain', args: [] },
+      }));
+      expect(callback).not.toHaveBeenCalled();
+    });
+
+    test('a primary emits to the socket and posts one EVENT for the peers', async () => {
+      await electAsPrimary(socketProxy);
+      h.mockChannel.postMessage.mockClear();
+
+      socketProxy.peers().emit('leave-room', 'room-1');
+
+      expect(h.mockSocket.emit).toHaveBeenCalledWith('leave-room', 'room-1');
+      expect(h.mockChannel.postMessage).toHaveBeenCalledTimes(1);
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'EVENT', data: { event: 'leave-room', args: ['room-1'] } })
+      );
+    });
+
+    test('the flag is consumed by the next emission', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+
+      socketProxy.peers().emit('first');
+      h.mockChannel.postMessage.mockClear();
+
+      socketProxy.emit('second');
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'EMIT', data: { event: 'second', args: [] } })
+      );
+    });
+
+    test('emitWithAck consumes the flag rather than leaking it', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+
+      socketProxy.peers().emitWithAck('ask').catch(() => {});
+      h.mockChannel.postMessage.mockClear();
+
+      socketProxy.emit('after');
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'EMIT', data: { event: 'after', args: [] } })
+      );
+    });
+  });
+
   describe('volatile and timeout', () => {
     beforeEach(async () => {
       await electAsPrimary(socketProxy);

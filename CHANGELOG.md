@@ -5,6 +5,218 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-25
+
+Adds deterministic promotion, reconnection-event forwarding, peer-notifying
+emits and observable connection state — enough to replace a hand-rolled
+tab-sharing proxy by changing an import rather than rewriting consumers. All
+additive to the public API, but the inter-tab protocol changed — see
+[Upgrade notes](#upgrade-notes-120).
+
+### Added
+
+- **`forcePrimary(): Promise<void>`** — takes ownership of the socket for this
+  tab, whatever the election says. The existing primary is asked to stand down
+  and answers once it has, so the handover never leaves two sockets open; there
+  is a brief window with no primary, which is the safe direction to fail. If
+  nobody answers, this tab promotes after `electionTimeout`. Resolves once the
+  tab actually holds the socket, and is idempotent on the existing primary.
+  Listeners registered beforehand keep working, since they live in the proxy.
+
+- **A primacy epoch.** Every promotion takes an epoch above every peer's, and
+  reconciliation now prefers the higher epoch, falling back to the `tabId`
+  tie-break only within one epoch. Without this a forced promotion could be
+  undone immediately: the newly promoted tab broadcasts `PRIMARY_CLAIM`, and a
+  stale primary holding a higher `tabId` would win the old tie-break. It also
+  makes ordinary split-brain resolution prefer the more recently elected tab.
+
+- **Manager reconnection events are bridged** — `reconnect`,
+  `reconnect_attempt`, `reconnect_error` and `reconnect_failed`. These are
+  emitted on the Manager (`socket.io`), not the socket, so neither `onAny` nor
+  `socket.on` ever saw them: a client that exhausted `reconnectionAttempts`
+  never learned the connection was gone for good and the UI showed the user
+  online forever. They now reach local listeners and every secondary, like the
+  existing lifecycle events. `reconnect_attempt` is the chatty one, if channel
+  traffic matters to you. Listeners are detached on demotion, since the Manager
+  can outlive the socket a tab was using.
+
+- **`peers()`** — marks the next `emit()` as peer-notifying: the server receives
+  it once, via the primary, and every **other** tab receives it through its
+  ordinary `on()` listeners. The emitting tab does not receive its own event.
+  Chainable, in the style of `volatile()`/`timeout()`, and consumed by the next
+  emission:
+
+  ```ts
+  proxy.peers().emit("leave-room", roomId);
+  ```
+
+  It is one message on the wire, not two: a secondary posts a single `EMIT` that
+  the primary relays to the server while every other tab hands it to its
+  listeners. `emitWithAck()` ignores the flag — it is a server round trip — but
+  still consumes it so it cannot leak into the next `emit()`.
+
+- **`connectionUpdate()` is now public.** Call it when the primary's connection
+  state changed in a way socket.io did not announce, to push `connected` / `id`
+  / `active` to the secondaries immediately. It is a no-op on a secondary, which
+  has no socket and would otherwise tell every tab the connection is down;
+  enable `debug` to see when a call was ignored for that reason.
+
+- **A mismatched connection identity is now reported instead of silent.**
+  Two call sites sharing a `channelId` but differing by one `auth` key resolve
+  to different channel names, so they never hear each other and each opens its
+  own socket — the failure a fingerprint is *supposed* to produce for two
+  different users, and a silent disaster when it is one user described
+  inconsistently. Nothing could detect it, because the two tabs are on different
+  channels by construction.
+
+  Each proxy now announces its identity on a diagnostics channel keyed by the
+  raw `channelId`, and warns when a peer's identity differs. Only key *paths*
+  ever go on the wire — `["auth.token", "auth.user", "url"]` — never values.
+
+  The warning is deliberately narrow: it fires only when the two identities are
+  described by different **key sets**. Matching keys with differing values means
+  two genuinely different principals, which is the whole point of the isolation
+  and stays silent. Different key sets — one side passing `auth.displayName`
+  that the other omits — is nearly always one principal configured two ways.
+
+  Disable with `warnOnIdentityMismatch: false`, which skips the diagnostics
+  channel entirely. Nothing is opened when `isolateByAuth` is false either,
+  since there is then nothing to detect.
+
+- **`wantsConnection`** — whether the channel is *meant* to be connected. Read
+  alongside `connected` it separates a deliberate offline state from a failed
+  one: `!connected && wantsConnection` is a connection that should be up and is
+  not. It is also the fourth field of the `connection_state_changed` payload.
+
+- **`SocketIOProxy.channelNameFor(channelId, url, options)`** — the channel name
+  a configuration resolves to, without constructing a proxy or opening a
+  channel. Two call sites meant to share a socket must produce the same value;
+  asserting that in a test turns a silent runtime split into a build failure.
+
+- **`connection_state_changed`** (`SocketIOProxy.CONNECTION_STATE_EVENT`) — a
+  secondary now fires a local event carrying `{ connected, id, active }`
+  whenever it applies a state push from the primary, instead of mutating
+  silently. Without it `connectionUpdate()` was half a feature: it pushed state
+  that no secondary could observe except by polling `proxy.connected`.
+
+  Socket-driven changes were already covered — `disconnect` is forwarded — so
+  this closes the *explicit push* case, which is the one where no socket event
+  is coming at all:
+
+  ```ts
+  // primary
+  if (proxy.active) { proxy.disconnect(); }
+  else { proxy.connectionUpdate(); }   // nothing else will announce this
+
+  // every secondary
+  proxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, ({ connected, id, active }) => {
+    updateConnectionUi(connected);
+  });
+  ```
+
+  It fires on every push it applies, not only on a change: the primary sends
+  these deliberately, so a receiver that suppressed an unchanged snapshot would
+  leave the caller unable to rely on being told. The primary does not fire it
+  for its own pushes — it is the originator, and has `connect`/`disconnect` for
+  socket-driven changes. Adoption during the `initialize()` handshake is also
+  silent, since it lands before the caller could have subscribed; the getters
+  carry that state the moment `initialize()` resolves.
+
+### Fixed
+
+- **`autoConnect: false` is now honored on promotion.** `becomePrimary()`
+  constructed the socket and never opened it. Under the default `autoConnect`
+  that is invisible, because `io()` opens the socket itself. With
+  `autoConnect: false` nothing else ever did: a tab promoted by heartbeat
+  failover held a socket that never connected — no `proxy_error`, no
+  `connect_error`, `connected` false forever — because nothing was attempted.
+  Automatic re-election, the library's headline feature, produced a primary
+  that could not talk. `forcePrimary()` had the same shape.
+
+  The fix is not an unconditional `connect()` on promotion, which would break
+  the reason to pass `autoConnect: false` in the first place. Instead the proxy
+  carries the consumer's **connection intent**:
+
+  - it starts connected, or disconnected when `autoConnect: false`;
+  - `connect()` sets it connected, `disconnect()` sets it disconnected;
+  - a promoted tab opens its socket only if the intent says so.
+
+  Intent is **channel-wide, not per-tab**, and rides along in `CONNECTION_STATE`
+  and `PRIMARY_ALIVE`. It has to be: the tab that gets promoted is rarely the
+  tab the consumer called `connect()` on, so a purely local flag would leave the
+  survivor closed. A tab constructed with the default `autoConnect: true` still
+  adopts the channel's intent when a primary answers its election — an
+  established channel's decision outranks a newcomer's default.
+
+- **`directChannelEmit()` no longer dispatches to the calling tab's own
+  listeners.** 1.1.0 added that, which was a behavior change from 1.0.x shipped
+  in a minor, and it made the natural `emit()` + `directChannelEmit()` pairing
+  re-enter the emitter's own handler. It is sender-excluded again, as in 1.0.x.
+
+### Changed
+
+- `PROTOCOL_VERSION` 2 → 3. `PRIMARY_CLAIM` and `HEARTBEAT` carry an `epoch`,
+  `PRIMARY_ALIVE` carries one too, `PRIMARY_DEMAND` / `PRIMARY_STOOD_DOWN` are
+  new, and `CONNECTION_STATE` / `PRIMARY_ALIVE` carry `wantsConnection`. One
+  bump covers the lot: 2 is the last published version, so 3 is simply "not 2".
+- `CONNECTION_STATUS`, `SOCKET_ID_UPDATE` and `ACTIVE_STATUS_UPDATE` are
+  replaced by a single `CONNECTION_STATE` carrying all three fields. Sent
+  separately they arrived as three messages, and a receiver acting on the first
+  would report a `connected` that did not yet match its still-stale `id` — which
+  is precisely the bug a per-message local event would have exposed. One message
+  means one coherent snapshot, and drops `connectionUpdate()` from three channel
+  posts to one.
+- **Failover no longer reopens a connection the consumer closed.** This is not
+  limited to `autoConnect: false`. Through 1.1.0, a channel that was explicitly
+  `disconnect()`ed and then lost its primary would come back up, because
+  promotion always constructed a fresh socket under the default `autoConnect`.
+  It now stays down until some tab calls `connect()`. That is the coherent
+  reading of a shared connection, but it is a behavior change for consumers who
+  never touched `autoConnect`.
+- `forcePrimary()` rejects rather than throwing synchronously when the channel
+  is closed, matching `emitWithAck()`. An async API that throws from the call
+  itself is a footgun, because `.catch()` would not catch it.
+
+### Tests
+
+- 208 → 299 specs, covering the spec's acceptance criteria directly: a forced
+  promotion across three live tabs (repeated ten times, asserting exactly one
+  socket and no stuck primary), `reconnect_failed` firing exactly once in every
+  tab, and `peers().emit` reaching the server once and the sibling tab but never
+  the sender.
+- `npm test` now runs jest with `--stack-size=2000`. jest's frames are large,
+  and the layered fake timers, spies and module mocks put `expect().toThrow()`
+  close enough to V8's default budget that the suite intermittently failed with
+  "Maximum call stack size exceeded" — in ~40% of full runs by the end of this
+  work. It reproduces deterministically under `--stack-size=800` on the
+  committed 1.1.0 tree too, so it is latent rather than new; the extra code here
+  simply consumed the remaining margin. The bump is headroom, not a workaround
+  for a recursion bug.
+
+  **Run the suite with `npm test`, not a bare `npx jest`.** Without the flag
+  roughly two dozen specs fail with `RangeError: Maximum call stack size
+  exceeded`, always at an `expect().toThrow()` and always with `source-map`'s
+  `doQuickSort` on the stack. That is jest formatting a failure, not the library
+  misbehaving.
+
+- The connection-intent specs were checked against three deliberately broken
+  implementations, so they are not decorative: removing the promotion gate fails
+  5, connecting unconditionally on promotion — the naive fix — fails 7, and
+  making intent per-tab rather than channel-wide fails 5.
+
+### Upgrade notes {#upgrade-notes-120}
+
+- **`autoConnect: false` consumers should drop any `connect()` they added to
+  work around this.** Calling it again is harmless — intent is idempotent — but
+  it is no longer load-bearing after a promotion.
+- **Mixed 1.1.0 / 1.2.0 tabs do not interoperate.** The channel tag embeds
+  `PROTOCOL_VERSION`, so during a rollout old and new tabs each elect their own
+  primary — two connections until every tab has reloaded. The alternative,
+  treating a missing epoch as `0`, would let mixed versions coordinate but would
+  leave `forcePrimary()` unable to demote a 1.1.0 tab, which is worse.
+- **`directChannelEmit()` callers relying on 1.1.0's local dispatch** must call
+  their own handler directly. Anyone who skipped 1.1.0 sees no change from 1.0.x.
+
 ## [1.1.0] - 2026-08-25
 
 A correctness and hardening release. The public API is backward compatible —
@@ -275,6 +487,7 @@ but the inter-tab wire protocol changed, so please read
 
 - Initial published releases.
 
+[1.2.0]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.2.0
 [1.1.0]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.1.0
 [1.0.2]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.0.2
 [1.0.1]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.0.1

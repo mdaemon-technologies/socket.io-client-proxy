@@ -10,31 +10,65 @@ import SocketIOProxy from '../../socket-io-proxy';
  * properties while the real library rejects it, which hid a bug where every
  * SOCKET_ID_UPDATE sent after a disconnect was silently discarded.
  *
+ * NOTE: `npm test` runs jest with `--stack-size=2000`. jest's own frames are
+ * large, and the layered fake timers, spies and module mocks below put
+ * `expect().toThrow()` close enough to V8's default budget that it
+ * intermittently raised "Maximum call stack size exceeded" — deterministically
+ * so under `--stack-size=800`, on the committed 1.1.0 tree as well as this one.
+ * The bump restores headroom; it is not hiding a recursion bug.
+ *
  * NOTE: the specs are split across several files on purpose. Registering
- * roughly ninety or more tests in a single file overflows the stack in this
- * jest/jsdom environment, and even `expect(1).toBe(1)` then fails.
+ * roughly ninety or more tests in a single file overflows the stack the same
+ * way, and even `expect(1).toBe(1)` then fails.
  */
 
 export type AnySocket = any;
 
-export function makeMockSocket(overrides: Record<string, any> = {}): AnySocket {
-  return {
+/**
+ * @param overrides fields to force onto the socket, applied last.
+ * @param opts the options `io()` was called with. `autoConnect: false` produces
+ *   a socket that starts closed, and `connect()` / `disconnect()` really move
+ *   `connected` / `active` / `id` — without that a test cannot tell a socket
+ *   that was opened from one that never was.
+ */
+export function makeMockSocket(
+  overrides: Record<string, any> = {},
+  opts: Record<string, any> = {},
+): AnySocket {
+  const open = opts.autoConnect !== false;
+  const id = overrides.id ?? 'test-socket-id';
+
+  const socket: AnySocket = {
     emit: jest.fn(),
     emitWithAck: jest.fn<any>().mockResolvedValue(undefined),
     on: jest.fn(),
     once: jest.fn(),
     off: jest.fn(),
-    disconnect: jest.fn(),
-    connect: jest.fn(),
     onAny: jest.fn(),
     volatile: {},
     timeout: jest.fn(),
-    id: 'test-socket-id',
-    connected: true,
-    active: true,
-    io: { on: jest.fn() },
-    ...overrides,
+    id: open ? id : undefined,
+    connected: open,
+    active: open,
+    io: { on: jest.fn(), off: jest.fn() },
   };
+
+  socket.connect = jest.fn(() => {
+    socket.connected = true;
+    socket.active = true;
+    socket.id = id;
+    return socket;
+  });
+  socket.disconnect = jest.fn(() => {
+    socket.connected = false;
+    socket.active = false;
+    socket.id = undefined;
+    return socket;
+  });
+
+  // `id` is consumed above; re-applying it here would reopen a closed socket.
+  const { id: _id, ...rest } = overrides;
+  return Object.assign(socket, rest);
 }
 
 export function makeMockChannel() {
@@ -50,7 +84,14 @@ export function makeMockChannel() {
 export interface Harness {
   mockSocket: AnySocket;
   mockChannel: ReturnType<typeof makeMockChannel>;
+  /** The identity-diagnostics channel, kept separate from the main one. */
+  lobbyChannel: ReturnType<typeof makeMockChannel>;
+  /** console.warn, spied so identity diagnostics do not litter the output. */
+  warn: any;
 }
+
+/** Must match IDENTITY_LOBBY_SUFFIX in the proxy. */
+export const IDENTITY_LOBBY_SUFFIX = '::sioproxy-identity';
 
 /**
  * Installs fake timers, a deterministic jitter source, a counter-based crypto
@@ -60,8 +101,33 @@ export interface Harness {
  * previous constant mock gave every instance the same tabId, which made the
  * duplicate-primary tie-break unreachable in tests.
  */
+/**
+ * Window listeners added while a test ran, so they can be unwound afterwards.
+ *
+ * A proxy that becomes primary registers beforeunload/pagehide/pageshow and only
+ * drops them on demotion or closeChannel(). Tests routinely leave proxies open,
+ * so without this every test inherits the listeners of every test before it and
+ * the suite becomes order-dependent.
+ */
+let trackedListeners: [string, any, any][] = [];
+let listenerTrackingInstalled = false;
+
+function trackWindowListeners(): void {
+  if (listenerTrackingInstalled) {
+    return;
+  }
+  listenerTrackingInstalled = true;
+  const realAdd = window.addEventListener.bind(window);
+  (window as any).addEventListener = (type: string, cb: any, opts?: any) => {
+    trackedListeners.push([type, cb, opts]);
+    return realAdd(type, cb, opts);
+  };
+}
+
 export function installFakes(): Harness {
   jest.useFakeTimers();
+  trackWindowListeners();
+  trackedListeners = [];
 
   // Election jitter is randomised; pin it to zero so timings are exact.
   jest.spyOn(Math, 'random').mockReturnValue(0);
@@ -83,18 +149,37 @@ export function installFakes(): Harness {
   // mockReset clears call history carried over from the previous test in this
   // file; jest.restoreAllMocks() does not reset module mocks.
   (io as jest.Mock).mockReset();
-  (io as jest.Mock).mockReturnValue(mockSocket);
+  // Always the same socket, so `h.mockSocket` stays the one the proxy holds —
+  // but reconfigured per call, so a proxy built with `autoConnect: false` gets
+  // a socket that really starts closed.
+  (io as jest.Mock).mockImplementation((...args: unknown[]) => {
+    const open = (args[1] as Record<string, any> | undefined)?.autoConnect !== false;
+    mockSocket.connected = open;
+    mockSocket.active = open;
+    mockSocket.id = open ? 'test-socket-id' : undefined;
+    return mockSocket;
+  });
 
+  // A proxy opens two channels: the main one and the identity lobby. They must
+  // be distinct here, or the lobby's onmessage would clobber the main handler.
   const mockChannel = makeMockChannel();
-  globalThis.BroadcastChannel = jest.fn()
-    .mockImplementation(() => mockChannel) as unknown as typeof BroadcastChannel;
+  const lobbyChannel = makeMockChannel();
+  globalThis.BroadcastChannel = jest.fn().mockImplementation((...args: unknown[]) =>
+    String(args[0] ?? '').endsWith(IDENTITY_LOBBY_SUFFIX) ? lobbyChannel : mockChannel
+  ) as unknown as typeof BroadcastChannel;
 
-  return { mockSocket, mockChannel };
+  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+  return { mockSocket, mockChannel, lobbyChannel, warn };
 }
 
 export function restoreFakes(): void {
   jest.useRealTimers();
   jest.restoreAllMocks();
+
+  // Drop anything a proxy the test left open registered on window.
+  trackedListeners.forEach(([type, cb, opts]) => window.removeEventListener(type, cb, opts));
+  trackedListeners = [];
 }
 
 // --- introspection -----------------------------------------------------------
@@ -130,8 +215,47 @@ export function msg(proxy: SocketIOProxy, payload: any) {
 export function primaryAlive(proxy: SocketIOProxy, overrides: Record<string, any> = {}) {
   return msg(proxy, {
     type: 'PRIMARY_ALIVE',
-    data: { tabId: 'ff'.repeat(24), connected: false, active: false, id: '', ...overrides },
+    data: {
+      tabId: 'ff'.repeat(24),
+      epoch: 1,
+      connected: false,
+      active: false,
+      id: '',
+      wantsConnection: true,
+      ...overrides,
+    },
   });
+}
+
+/** A well-formed PRIMARY_CLAIM from some other tab. */
+export function primaryClaim(proxy: SocketIOProxy, overrides: Record<string, any> = {}) {
+  return msg(proxy, {
+    type: 'PRIMARY_CLAIM',
+    data: { tabId: 'ff'.repeat(24), epoch: 1, ...overrides },
+  });
+}
+
+/** A well-formed HEARTBEAT from some other tab. */
+export function heartbeat(proxy: SocketIOProxy, overrides: Record<string, any> = {}) {
+  return msg(proxy, {
+    type: 'HEARTBEAT',
+    data: { tabId: 'ff'.repeat(24), epoch: 1, ...overrides },
+  });
+}
+
+/** A well-formed CONNECTION_STATE push from the primary. */
+export function connectionState(proxy: SocketIOProxy, overrides: Record<string, any> = {}) {
+  return msg(proxy, {
+    type: 'CONNECTION_STATE',
+    data: {
+      connected: true, active: true, id: 'test-socket-id', wantsConnection: true, ...overrides,
+    },
+  });
+}
+
+/** The epoch a proxy currently holds; 0 when it is not the primary. */
+export function epochOf(proxy: SocketIOProxy): number {
+  return (proxy as any).epoch;
 }
 
 /** Answers the proxy's PRIMARY_CHECK so it settles as a secondary. */
@@ -274,8 +398,11 @@ export function installBus(): BusHarness {
     (...args: unknown[]) => new FakeChannel(args[0] as string, bus)
   ) as unknown as typeof BroadcastChannel;
 
-  (io as jest.Mock).mockImplementation(() => {
-    const socket = makeMockSocket({ id: `socket-${sockets.length + 1}` });
+  (io as jest.Mock).mockImplementation((...args: unknown[]) => {
+    const socket = makeMockSocket(
+      { id: `socket-${sockets.length + 1}` },
+      (args[1] as Record<string, any>) ?? {},
+    );
     sockets.push(socket);
     return socket;
   });

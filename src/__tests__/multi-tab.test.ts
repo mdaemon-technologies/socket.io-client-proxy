@@ -20,9 +20,10 @@ jest.mock('socket.io-client');
 describe('multi-tab behaviour', () => {
   let bus: BusHarness['bus'];
   let sockets: AnySocket[];
+  let warn: any;
 
   beforeEach(() => {
-    installFakes();
+    ({ warn } = installFakes());
     ({ bus, sockets } = installBus());
   });
 
@@ -129,6 +130,84 @@ describe('multi-tab behaviour', () => {
     });
   });
 
+  describe('forced promotion', () => {
+    test('three tabs: forcePrimary on the third leaves exactly one socket, owned by it', async () => {
+      const [a, b, c] = [makeTab(), makeTab(), makeTab()];
+      await electAsPrimary(a);
+      await b.initialize();
+      await c.initialize();
+      expect(livePrimaries(a, b, c)).toEqual([a]);
+
+      const promise = c.forcePrimary();
+      jest.advanceTimersByTime(2500);
+      await promise;
+
+      expect(livePrimaries(a, b, c)).toEqual([c]);
+      // a's socket was hung up, c opened one; exactly one is still live.
+      expect(sockets.filter(s => !s.disconnect.mock.calls.length)).toHaveLength(1);
+
+      // ...and the other two still receive relayed events.
+      const onA = jest.fn();
+      const onB = jest.fn();
+      a.on('relayed', onA);
+      b.on('relayed', onB);
+      onAnyOf(c)('relayed', 'payload');
+      expect(onA).toHaveBeenCalledWith('payload');
+      expect(onB).toHaveBeenCalledWith('payload');
+    });
+
+    test('repeated handovers never leave a stuck or duplicated primary', async () => {
+      const tabs = [makeTab(), makeTab(), makeTab()];
+      await electAsPrimary(tabs[0]);
+      await tabs[1].initialize();
+      await tabs[2].initialize();
+
+      for (let i = 0; i < 10; i++) {
+        const target = tabs[i % 3];
+        const promise = target.forcePrimary();
+        jest.advanceTimersByTime(2500);
+        await promise;
+
+        expect(livePrimaries(...tabs)).toEqual([target]);
+      }
+    });
+
+    test('a forced promotion survives a stale primary with a higher tabId', async () => {
+      const [a, b] = [makeTab(), makeTab()];
+      await electAsPrimary(a);
+      await b.initialize();
+
+      const loser = tabIdOf(a) > tabIdOf(b) ? a : b;
+      const winner = loser === a ? b : a;
+
+      // Whichever tab holds the LOWER tabId demands the socket: under the old
+      // tabId-only tie-break the other would have claimed it straight back.
+      const demander = tabIdOf(a) < tabIdOf(b) ? a : b;
+      const promise = demander.forcePrimary();
+      jest.advanceTimersByTime(2500);
+      await promise;
+
+      expect(livePrimaries(a, b)).toEqual([demander]);
+      void winner; void loser;
+    });
+
+    test('a secondary keeps its listeners across a forced promotion', async () => {
+      const [a, b] = [makeTab(), makeTab()];
+      await electAsPrimary(a);
+      await b.initialize();
+
+      const callback = jest.fn();
+      b.on('after-promotion', callback);
+
+      const promise = b.forcePrimary();
+      jest.advanceTimersByTime(2500);
+      await promise;
+
+      onAnyOf(b)('after-promotion', 'ok');
+      expect(callback).toHaveBeenCalledWith('ok');
+    });
+  });
+
   describe('failover', () => {
     test('secondaries fail over when the primary announces departure', async () => {
       const primary = makeTab();
@@ -203,6 +282,160 @@ describe('multi-tab behaviour', () => {
 
   });
 
+  /**
+   * With the default autoConnect, `io()` opens the socket itself and promotion
+   * needs no help. With autoConnect false nothing else ever opens it, so a tab
+   * promoted by failover used to hold a socket that never connected — no error,
+   * no connect_error, `connected` false forever, because nothing was attempted.
+   *
+   * Intent is channel-wide rather than per-tab: the tab that gets promoted is
+   * usually not the tab the consumer called connect() on.
+   */
+  describe('deferred connections (autoConnect: false)', () => {
+    const deferred = { autoConnect: false };
+
+    /** Two settled tabs on a channel that has not opened its socket yet. */
+    async function twoDeferredTabs() {
+      const primary = makeTab('deferred', deferred);
+      await electAsPrimary(primary);
+      const secondary = makeTab('deferred', deferred);
+      await secondary.initialize();
+      return { primary, secondary };
+    }
+
+    /** Announced departure, then long enough for the election to settle. */
+    function killPrimary(primary: SocketIOProxy) {
+      primary.closeChannel();
+      jest.advanceTimersByTime(2500);
+    }
+
+    test('nothing opens the socket until the consumer asks', async () => {
+      const { primary } = await twoDeferredTabs();
+
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0].connect).not.toHaveBeenCalled();
+      expect(primary.connected).toBe(false);
+      expect(primary.wantsConnection).toBe(false);
+    });
+
+    test('a promoted tab opens its socket because another tab asked for it', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+
+      // Called once, on the tab that is about to die.
+      primary.connect();
+      expect(secondary.wantsConnection).toBe(true);
+
+      killPrimary(primary);
+
+      expect(secondary.isPrimary).toBe(true);
+      expect(sockets).toHaveLength(2);
+      expect(sockets[1].connect).toHaveBeenCalled();
+      expect(secondary.connected).toBe(true);
+    });
+
+    test('a promoted tab stays closed when nobody asked — autoConnect is honoured', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+
+      killPrimary(primary);
+
+      expect(secondary.isPrimary).toBe(true);
+      expect(sockets).toHaveLength(2);
+      expect(sockets[1].connect).not.toHaveBeenCalled();
+      expect(secondary.connected).toBe(false);
+    });
+
+    test('a promoted tab does not reopen a connection the consumer closed', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+
+      primary.connect();
+      primary.disconnect();
+      expect(secondary.wantsConnection).toBe(false);
+
+      killPrimary(primary);
+
+      expect(secondary.isPrimary).toBe(true);
+      expect(sockets[1].connect).not.toHaveBeenCalled();
+      expect(secondary.connected).toBe(false);
+    });
+
+    test('a silent death is no different from an announced one', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+      primary.connect();
+
+      // No PRIMARY_LEAVING at all: the heartbeat monitor drives this one.
+      (primary as any).stopHeartbeat();
+      (primary as any).channel.close();
+      jest.advanceTimersByTime(13000);
+      jest.advanceTimersByTime(2500);
+
+      expect(secondary.isPrimary).toBe(true);
+      expect(sockets[1].connect).toHaveBeenCalled();
+    });
+
+    test('forcePrimary() hands over a connection without a following connect()', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+      primary.connect();
+
+      const promise = secondary.forcePrimary();
+      jest.advanceTimersByTime(2500);
+      await promise;
+
+      expect(secondary.isPrimary).toBe(true);
+      // The consumer's next line is an emit, not a connect.
+      expect(sockets[1].connect).toHaveBeenCalled();
+      expect(secondary.active).toBe(true);
+    });
+
+    test('connect() on a secondary reaches the primary and the whole channel', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+
+      secondary.connect();
+
+      expect(sockets[0].connect).toHaveBeenCalled();
+      expect(primary.connected).toBe(true);
+      expect(primary.wantsConnection).toBe(true);
+      expect(secondary.connected).toBe(true);
+    });
+
+    test('a newcomer does not drag a deliberately-offline channel online', async () => {
+      // Only two tabs here, so the survivor of the election is unambiguous.
+      const primary = makeTab('deferred', deferred);
+      await electAsPrimary(primary);
+
+      // Default options: this tab's own autoConnect says "connect me".
+      const newcomer = makeTab('deferred');
+      await newcomer.initialize();
+
+      // ...but the channel has already decided otherwise.
+      expect(newcomer.wantsConnection).toBe(false);
+      expect(newcomer.isPrimary).toBe(false);
+      expect(sockets).toHaveLength(1);
+
+      killPrimary(primary);
+      expect(newcomer.isPrimary).toBe(true);
+      expect(sockets[1].connect).not.toHaveBeenCalled();
+    });
+
+    test('intent survives demotion, so a re-promoted tab reconnects', async () => {
+      const { primary, secondary } = await twoDeferredTabs();
+      primary.connect();
+
+      // secondary takes over, then hands back to a third tab, then takes over
+      // again — intent must not be lost anywhere along the way.
+      const first = secondary.forcePrimary();
+      jest.advanceTimersByTime(2500);
+      await first;
+
+      const back = primary.forcePrimary();
+      jest.advanceTimersByTime(2500);
+      await back;
+
+      expect(primary.isPrimary).toBe(true);
+      expect(primary.wantsConnection).toBe(true);
+      expect(sockets[sockets.length - 1].connect).toHaveBeenCalled();
+    });
+  });
+
   describe('traffic between tabs', () => {
     let primary: SocketIOProxy;
     let secondary: SocketIOProxy;
@@ -253,7 +486,38 @@ describe('multi-tab behaviour', () => {
       expect(subscriber).toHaveBeenCalledWith({ key: 'prefs' });
     });
 
-    test('directChannelEmit reaches every tab including the sender', () => {
+    test('peers().emit reaches the server once and the sibling tab, not the sender', () => {
+      // The spec's acceptance criterion for A3, and the subtlest of them.
+      const onPrimary = jest.fn();
+      const onSecondary = jest.fn();
+      primary.on('leave-room', onPrimary);
+      secondary.on('leave-room', onSecondary);
+
+      secondary.peers().emit('leave-room', 'room-1');
+
+      expect(sockets[0].emit).toHaveBeenCalledTimes(1);
+      expect(sockets[0].emit).toHaveBeenCalledWith('leave-room', 'room-1');
+      expect(onPrimary).toHaveBeenCalledTimes(1);
+      expect(onPrimary).toHaveBeenCalledWith('room-1');
+      expect(onSecondary).not.toHaveBeenCalled();
+    });
+
+    test('reconnect_failed fires exactly once in every tab', () => {
+      // The spec's acceptance criterion for A2.
+      const onPrimary = jest.fn();
+      const onSecondary = jest.fn();
+      primary.on('reconnect_failed', onPrimary);
+      secondary.on('reconnect_failed', onSecondary);
+
+      const call = sockets[0].io.on.mock.calls.find((c: any[]) => c[0] === 'reconnect_failed');
+      expect(call).toBeDefined();
+      call[1]();
+
+      expect(onPrimary).toHaveBeenCalledTimes(1);
+      expect(onSecondary).toHaveBeenCalledTimes(1);
+    });
+
+    test('directChannelEmit reaches the other tabs but not the sender', () => {
       const onPrimary = jest.fn();
       const onSecondary = jest.fn();
       primary.on('local-update', onPrimary);
@@ -261,8 +525,38 @@ describe('multi-tab behaviour', () => {
 
       primary.directChannelEmit('local-update', { cached: true });
 
-      expect(onPrimary).toHaveBeenCalledWith({ cached: true });
       expect(onSecondary).toHaveBeenCalledWith({ cached: true });
+      expect(onPrimary).not.toHaveBeenCalled();
+    });
+
+    test('connectionUpdate() with no socket event in flight reaches every secondary', () => {
+      // A7's acceptance criterion: the primary pushes state that socket.io will
+      // never announce, and secondaries learn about it by subscribing.
+      const second = makeTab();
+      void second.initialize();
+      jest.advanceTimersByTime(0);
+
+      const onSecondary = jest.fn();
+      const onSecond = jest.fn();
+      secondary.on(SocketIOProxy.CONNECTION_STATE_EVENT, onSecondary);
+      second.on(SocketIOProxy.CONNECTION_STATE_EVENT, onSecond);
+
+      // The socket is inactive, so disconnect() would emit nothing at all.
+      sockets[0].connected = false;
+      sockets[0].active = false;
+      sockets[0].id = undefined;
+      primary.connectionUpdate();
+
+      const expected = { connected: false, id: undefined, active: false, wantsConnection: true };
+      expect(onSecondary).toHaveBeenCalledTimes(1);
+      expect(onSecondary).toHaveBeenCalledWith(expected);
+      expect(onSecond).toHaveBeenCalledTimes(1);
+      expect(onSecond).toHaveBeenCalledWith(expected);
+
+      // ...and the getters agree, so neither polling nor the payload is wrong.
+      expect(secondary.connected).toBe(false);
+      expect(secondary.id).toBeUndefined();
+      expect(secondary.active).toBe(false);
     });
 
     test('a secondary sees the primary disconnect and cleared id', () => {
@@ -315,6 +609,46 @@ describe('multi-tab behaviour', () => {
       const a = makeTab('clone-check');
       expect(() => a.directChannelEmit('x', () => {})).toThrow();
       expect(() => a.directChannelEmit('x', { fine: true })).not.toThrow();
+    });
+
+    test('a drifted identity is reported, not left silent', () => {
+      // The classic drift, end to end: one service passes displayName and its
+      // sibling does not, so the two silently open two sockets.
+      const withName = makeTab('rtc', { auth: { user: 'u', token: 't', displayName: 'U' } });
+      const without = makeTab('rtc', { auth: { user: 'u', token: 't' } });
+
+      expect(withName.channelName).not.toBe(without.channelName);
+      expect(warn).toHaveBeenCalled();
+      const text = warn.mock.calls.map((c: any[]) => c.join(' ')).join(' | ');
+      expect(text).toContain('auth.displayName');
+      expect(text).toContain('"rtc"');
+    });
+
+    test('both sides of a drifted pair are told, whichever started first', () => {
+      makeTab('rtc', { auth: { user: 'u', token: 't', displayName: 'U' } });
+      warn.mockClear();
+      // The newcomer announces; the tab already running answers, so the
+      // newcomer learns about it too rather than only the other way round.
+      makeTab('rtc', { auth: { user: 'u', token: 't' } });
+
+      expect(warn.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+
+    test('two genuinely different users are not warned about', () => {
+      const userA = makeTab('rtc', { auth: { user: 'a', token: 't1' } });
+      const userB = makeTab('rtc', { auth: { user: 'b', token: 't2' } });
+
+      // Separate connections, which is the point — and no false alarm.
+      expect(userA.channelName).not.toBe(userB.channelName);
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    test('matching identities neither warn nor split', () => {
+      const a = makeTab('rtc', { auth: { user: 'u', token: 't' } });
+      const b = makeTab('rtc', { auth: { user: 'u', token: 't' } });
+
+      expect(a.channelName).toBe(b.channelName);
+      expect(warn).not.toHaveBeenCalled();
     });
 
     test('tabs on unrelated channel ids ignore each other', () => {

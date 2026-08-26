@@ -10,6 +10,7 @@ import {
   electAsPrimary,
   joinAsSecondary,
   msg,
+  connectionState,
 } from './helpers/harness';
 
 jest.mock('socket.io-client');
@@ -72,16 +73,18 @@ describe('wire protocol', () => {
       );
     });
 
-    test('broadcasts socket id and active state on connect', () => {
+    test('broadcasts the whole state in one message on connect', () => {
       h.mockChannel.postMessage.mockClear();
       socketHandler(h.mockSocket, 'connect')();
 
-      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'SOCKET_ID_UPDATE', data: { id: 'test-socket-id' } })
-      );
-      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
-        expect.objectContaining({ type: 'ACTIVE_STATUS_UPDATE', data: { active: true } })
-      );
+      const state = h.mockChannel.postMessage.mock.calls
+        .map((c: any[]) => c[0])
+        .filter((m: any) => m.type === 'CONNECTION_STATE');
+      // One message, not three: a receiver must never see a half-applied state.
+      expect(state).toHaveLength(1);
+      expect(state[0].data).toEqual({
+        connected: true, active: true, id: 'test-socket-id', wantsConnection: true,
+      });
     });
 
     test('a cleared socket id is broadcast as a sentinel that validates', () => {
@@ -94,10 +97,12 @@ describe('wire protocol', () => {
 
       socketHandler(h.mockSocket, 'disconnect')('transport close');
 
-      const idUpdate = h.mockChannel.postMessage.mock.calls
+      const state = h.mockChannel.postMessage.mock.calls
         .map((c: any[]) => c[0])
-        .find((m: any) => m.type === 'SOCKET_ID_UPDATE');
-      expect(idUpdate.data.id).toBe('');
+        .find((m: any) => m.type === 'CONNECTION_STATE');
+      expect(state.data).toEqual({
+        connected: false, active: false, id: '', wantsConnection: true,
+      });
     });
 
     test('a payload that cannot be cloned surfaces as proxy_error, not a throw', () => {
@@ -123,11 +128,139 @@ describe('wire protocol', () => {
       expect(local).toHaveBeenCalled();
     });
 
+    test('connectionUpdate() does not fire the event on the primary itself', () => {
+      // The primary is the originator: it already knows, and it has
+      // connect/disconnect for socket-driven changes.
+      const listener = jest.fn();
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+
+      socketProxy.connectionUpdate();
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    test('disconnect() pushes intent even when the socket emits nothing', () => {
+      // An already-inactive socket emits no disconnect event at all, so without
+      // the explicit push the channel would never hear that it is meant to
+      // stay closed — and the next tab promoted would reopen it.
+      h.mockSocket.connected = false;
+      h.mockSocket.active = false;
+      h.mockChannel.postMessage.mockClear();
+
+      socketProxy.disconnect();
+
+      const state = h.mockChannel.postMessage.mock.calls
+        .map((c: any[]) => c[0])
+        .filter((m: any) => m.type === 'CONNECTION_STATE');
+      expect(state).toHaveLength(1);
+      expect(state[0].data.wantsConnection).toBe(false);
+    });
+
+    test('connect() from a secondary makes the primary publish the new intent', () => {
+      h.mockChannel.postMessage.mockClear();
+      socketProxy.disconnect();
+      h.mockChannel.postMessage.mockClear();
+
+      h.mockChannel.onmessage(msg(socketProxy, { type: 'CONNECT' }));
+
+      expect(h.mockSocket.connect).toHaveBeenCalled();
+      const state = h.mockChannel.postMessage.mock.calls
+        .map((c: any[]) => c[0])
+        .filter((m: any) => m.type === 'CONNECTION_STATE');
+      expect(state[state.length - 1].data.wantsConnection).toBe(true);
+    });
+
+    test('connectionUpdate() pushes the whole state in one message', () => {
+      h.mockChannel.postMessage.mockClear();
+      socketProxy.connectionUpdate();
+
+      expect(h.mockChannel.postMessage).toHaveBeenCalledTimes(1);
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'CONNECTION_STATE',
+          data: { connected: true, active: true, id: 'test-socket-id', wantsConnection: true },
+        })
+      );
+    });
+
     test('a peer accepts the sentinel and clears its cached id', () => {
       const peer = new SocketIOProxy('test-channel', 'ws://test-url');
       (peer as any).socketId = 'stale-id';
-      h.mockChannel.onmessage(msg(peer, { type: 'SOCKET_ID_UPDATE', data: { id: '' } }));
+      h.mockChannel.onmessage(connectionState(peer, { connected: false, active: false, id: '' }));
       expect(peer.id).toBeUndefined();
+    });
+  });
+
+  describe('manager (reconnection) events', () => {
+    beforeEach(async () => {
+      await electAsPrimary(socketProxy);
+    });
+
+    function managerHandler(event: string): (...args: any[]) => void {
+      const call = h.mockSocket.io.on.mock.calls.find((c: any[]) => c[0] === event);
+      if (!call) throw new Error(`no manager handler for "${event}"`);
+      return call[1];
+    }
+
+    test.each(['reconnect', 'reconnect_attempt', 'reconnect_error', 'reconnect_failed'])(
+      'bridges %s from the Manager', (event) => {
+        const callback = jest.fn();
+        socketProxy.on(event, callback);
+        h.mockChannel.postMessage.mockClear();
+
+        managerHandler(event)(1);
+
+        expect(callback).toHaveBeenCalledWith(1);
+        expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'EVENT', data: { event, args: [1] } })
+        );
+      }
+    );
+
+    test('reconnect_failed reaches a secondary through the relayed EVENT', async () => {
+      const secondary = new SocketIOProxy('test-channel', 'ws://test-url');
+      await joinAsSecondary(h.mockChannel, secondary);
+
+      const callback = jest.fn();
+      secondary.on('reconnect_failed', callback);
+
+      h.mockChannel.onmessage(msg(secondary, {
+        type: 'EVENT', data: { event: 'reconnect_failed', args: [] },
+      }));
+      expect(callback).toHaveBeenCalledTimes(1);
+    });
+
+    test('a reconnect_error carries a cloneable message', () => {
+      h.mockChannel.postMessage.mockClear();
+      managerHandler('reconnect_error')(new Error('xhr poll error'));
+
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'EVENT', data: { event: 'reconnect_error', args: ['xhr poll error'] },
+        })
+      );
+    });
+
+    test('manager listeners are detached on demotion', () => {
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'PRIMARY_DEMAND', data: { tabId: 'zz'.repeat(24) },
+      }));
+      expect(socketProxy.isPrimary).toBe(false);
+      expect(h.mockSocket.io.off).toHaveBeenCalledTimes(4);
+    });
+
+    test('a demoted tab does not relay manager events', () => {
+      const handler = managerHandler('reconnect_failed');
+      const callback = jest.fn();
+      socketProxy.on('reconnect_failed', callback);
+
+      h.mockChannel.onmessage(msg(socketProxy, {
+        type: 'PRIMARY_DEMAND', data: { tabId: 'zz'.repeat(24) },
+      }));
+      h.mockChannel.postMessage.mockClear();
+
+      handler();
+      expect(callback).not.toHaveBeenCalled();
+      expect(h.mockChannel.postMessage).not.toHaveBeenCalled();
     });
   });
 
@@ -143,7 +276,10 @@ describe('wire protocol', () => {
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'PRIMARY_ALIVE',
-          data: { tabId: tabIdOf(socketProxy), connected: true, active: true, id: 'test-socket-id' },
+          data: {
+            tabId: tabIdOf(socketProxy), epoch: 1, connected: true, active: true,
+            id: 'test-socket-id', wantsConnection: true,
+          },
         })
       );
     });
@@ -265,14 +401,103 @@ describe('wire protocol', () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
     });
 
-    test('updates socketId on SOCKET_ID_UPDATE', () => {
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'SOCKET_ID_UPDATE', data: { id: 'new-id' } }));
+    test('connectionUpdate() is a no-op on a secondary', () => {
+      // A secondary has no socket, so broadcasting its state would tell every
+      // tab the connection is down.
+      socketProxy.connectionUpdate();
+      expect(h.mockChannel.postMessage).not.toHaveBeenCalled();
+    });
+
+    test('a DISCONNECT from a peer moves this tab intent even with no socket', () => {
+      // The tab that gets promoted is rarely the tab the consumer called
+      // disconnect() on, so hearing the request has to be enough.
+      const secondary = new SocketIOProxy('secondary-intent', 'ws://test-url');
+      expect(secondary.wantsConnection).toBe(true);
+
+      h.mockChannel.onmessage(msg(secondary, { type: 'DISCONNECT' }));
+
+      expect(secondary.wantsConnection).toBe(false);
+      expect(secondary.isPrimary).toBe(false);
+    });
+
+    test('adopts the channel intent from a CONNECTION_STATE push', () => {
+      expect(socketProxy.wantsConnection).toBe(true);
+
+      h.mockChannel.onmessage(connectionState(socketProxy, {
+        connected: false, active: false, id: '', wantsConnection: false,
+      }));
+
+      expect(socketProxy.wantsConnection).toBe(false);
+    });
+
+    test('fires connection_state_changed with the full snapshot', () => {
+      const listener = jest.fn();
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+
+      h.mockChannel.onmessage(connectionState(socketProxy, {
+        connected: true, active: true, id: 'live-id',
+      }));
+
+      expect(listener).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledWith({
+        connected: true, id: 'live-id', active: true, wantsConnection: true,
+      });
+    });
+
+    test('reports the cleared id as undefined, not the wire sentinel', () => {
+      const listener = jest.fn();
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+
+      h.mockChannel.onmessage(connectionState(socketProxy, {
+        connected: false, active: false, id: '',
+      }));
+
+      expect(listener).toHaveBeenCalledWith({
+        connected: false, id: undefined, active: false, wantsConnection: true,
+      });
+    });
+
+    test('the getters already agree with the snapshot when the listener runs', () => {
+      // A listener that reads proxy.connected instead of the payload must not
+      // see the pre-push value.
+      const seen: any[] = [];
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, () => {
+        seen.push({
+          connected: socketProxy.connected,
+          wantsConnection: socketProxy.wantsConnection,
+          id: socketProxy.id,
+          active: socketProxy.active,
+        });
+      });
+
+      h.mockChannel.onmessage(connectionState(socketProxy, {
+        connected: true, active: true, id: 'live-id',
+      }));
+
+      expect(seen).toEqual([{ connected: true, id: 'live-id', active: true, wantsConnection: true }]);
+    });
+
+    test('fires on every push, including one that changes nothing', () => {
+      // The primary sends these deliberately, so a receiver must not suppress
+      // an unchanged snapshot — the caller has to be able to rely on being told.
+      const listener = jest.fn();
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+
+      const same = { connected: false, active: false, id: '' };
+      h.mockChannel.onmessage(connectionState(socketProxy, same));
+      h.mockChannel.onmessage(connectionState(socketProxy, same));
+
+      expect(listener).toHaveBeenCalledTimes(2);
+    });
+
+    test('updates socketId from a CONNECTION_STATE push', () => {
+      h.mockChannel.onmessage(connectionState(socketProxy, { id: 'new-id' }));
       expect(socketProxy.id).toBe('new-id');
     });
 
     test('clears socketId when the sentinel arrives', () => {
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'SOCKET_ID_UPDATE', data: { id: 'new-id' } }));
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'SOCKET_ID_UPDATE', data: { id: '' } }));
+      h.mockChannel.onmessage(connectionState(socketProxy, { id: 'new-id' }));
+      h.mockChannel.onmessage(connectionState(socketProxy, { id: '' }));
       expect(socketProxy.id).toBeUndefined();
     });
 
@@ -286,11 +511,11 @@ describe('wire protocol', () => {
       expect(socketProxy.id).toBe('unchanged');
     });
 
-    test('updates active status on ACTIVE_STATUS_UPDATE', () => {
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'ACTIVE_STATUS_UPDATE', data: { active: true } }));
+    test('updates active status from a CONNECTION_STATE push', () => {
+      h.mockChannel.onmessage(connectionState(socketProxy, { active: true }));
       expect(socketProxy.active).toBe(true);
 
-      h.mockChannel.onmessage(msg(socketProxy, { type: 'ACTIVE_STATUS_UPDATE', data: { active: false } }));
+      h.mockChannel.onmessage(connectionState(socketProxy, { active: false }));
       expect(socketProxy.active).toBe(false);
     });
   });
@@ -355,9 +580,33 @@ describe('wire protocol', () => {
       expect(callback).not.toHaveBeenCalled();
     });
 
-    test('rejects CONNECTION_STATUS with a non-boolean connected', () => {
-      bad({ type: 'CONNECTION_STATUS', data: { connected: 'yes' } });
+    test('rejects CONNECTION_STATE with a non-boolean connected', () => {
+      bad({ type: 'CONNECTION_STATE', data: { connected: 'yes', active: true, id: '' } });
       expect(socketProxy.connected).toBeFalsy();
+    });
+
+    test('rejects a CONNECTION_STATE missing any of its fields', () => {
+      // Partial state is what made several separate messages a problem; the
+      // collapsed message must be all-or-nothing.
+      const listener = jest.fn();
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+
+      bad({ type: 'CONNECTION_STATE', data: { connected: true, active: true, id: '' } });
+      bad({ type: 'CONNECTION_STATE', data: { connected: true, active: true, wantsConnection: true } });
+      bad({ type: 'CONNECTION_STATE', data: { connected: true, id: '', wantsConnection: true } });
+      bad({ type: 'CONNECTION_STATE', data: { active: true, id: '', wantsConnection: true } });
+
+      expect(listener).not.toHaveBeenCalled();
+    });
+
+    test('rejects a CONNECTION_STATE with a non-boolean wantsConnection', () => {
+      const listener = jest.fn();
+      socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
+      bad({
+        type: 'CONNECTION_STATE',
+        data: { connected: true, active: true, id: '', wantsConnection: 'yes' },
+      });
+      expect(listener).not.toHaveBeenCalled();
     });
 
     test('rejects EMIT_WITH_ACK with a missing id', () => {
@@ -372,16 +621,29 @@ describe('wire protocol', () => {
       expect(subscriber).not.toHaveBeenCalled();
     });
 
-    test('rejects SOCKET_ID_UPDATE with a non-string id', () => {
+    test('rejects CONNECTION_STATE with a non-string id', () => {
       (socketProxy as any).socketId = 'unchanged';
       (socketProxy as any).isPrimary = false;
-      bad({ type: 'SOCKET_ID_UPDATE', data: { id: 42 } });
+      bad({ type: 'CONNECTION_STATE', data: { connected: true, active: true, id: 42 } });
       expect(socketProxy.id).toBe('unchanged');
     });
 
     test('rejects HEARTBEAT and PRIMARY_CLAIM with no tabId', () => {
       expect(() => bad({ type: 'HEARTBEAT' })).not.toThrow();
       bad({ type: 'PRIMARY_CLAIM', data: {} });
+      expect(socketProxy.isPrimary).toBe(true);
+    });
+
+    test('rejects PRIMARY_CLAIM and HEARTBEAT with no epoch', () => {
+      // epoch decides which of two primaries survives, so a claim without one
+      // must not be actioned.
+      bad({ type: 'PRIMARY_CLAIM', data: { tabId: 'zz'.repeat(24) } });
+      bad({ type: 'HEARTBEAT', data: { tabId: 'zz'.repeat(24) } });
+      expect(socketProxy.isPrimary).toBe(true);
+    });
+
+    test('rejects PRIMARY_DEMAND with no tabId', () => {
+      bad({ type: 'PRIMARY_DEMAND', data: {} });
       expect(socketProxy.isPrimary).toBe(true);
     });
 

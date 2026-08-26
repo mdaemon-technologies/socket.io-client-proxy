@@ -128,6 +128,8 @@ new SocketIOProxy(channelId: string, url: string, options?: SocketIOProxyOptions
 | `electionTimeout` | `number` | `2000` | How long to wait for an existing primary to answer before self-promoting, in ms |
 | `electionJitter` | `number` | `250` | Upper bound of the random delay added to `electionTimeout`, staggering simultaneous elections |
 | `isolateByAuth` | `boolean` | `true` | Fold the connection identity into the channel name — see [Identity isolation](#identity-isolation) |
+| `warnOnIdentityMismatch` | `boolean` | `true` | Warn when another tab on the same `channelId` describes its identity with a different set of keys — see [Catching a drifted identity](#catching-a-drifted-identity) |
+| `autoConnect` | `boolean` | `true` | Passed through to socket.io, and seeds the channel's connection intent — see [Deferred connections](#deferred-connections) |
 
 Every other option is passed straight through to `socket.io-client`.
 
@@ -140,6 +142,8 @@ Every other option is passed straight through to `socket.io-client`.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `initialize()` | `Promise<void>` | Negotiate primary/secondary role and set up listeners |
+| `forcePrimary()` | `Promise<void>` | Take ownership of the socket for this tab, whatever the election says. See [Forcing promotion](#forcing-promotion) |
+| `connectionUpdate()` | `void` | Push this tab's `connected` / `id` / `active` to the other tabs now, firing `connection_state_changed` on each. Primary only; a no-op on a secondary |
 | `connect()` | `void` | Reconnect the socket (primary executes, secondary delegates) |
 | `disconnect()` | `void` | Disconnect the socket |
 | `closeChannel()` | `void` | Tear the proxy down: announce departure, disconnect if primary, reject pending acks and close the channel. Idempotent; the instance is unusable afterwards |
@@ -152,9 +156,19 @@ Every other option is passed straight through to `socket.io-client`.
 | `once(event, callback)` | `void` | Register one-time event listener |
 | `off(event, callback?)` | `void` | Remove listener (or all listeners for event if no callback) |
 
+Besides server events, a proxy emits two local-only events:
+`SocketIOProxy.CONNECTION_STATE_EVENT` (`connection_state_changed`, see
+[Reacting to connection changes](#reacting-to-connection-changes)) and
+`SocketIOProxy.PROXY_ERROR_EVENT` (`proxy_error`, see
+[Handling Internal Errors](#handling-internal-errors)).
+
 Listeners behave identically whether the tab is primary or secondary, and they
 survive a demotion. Socket lifecycle events (`connect`, `disconnect`,
-`connect_error`) are forwarded to every tab.
+`connect_error`) are forwarded to every tab, as are the Manager's reconnection
+events (`reconnect`, `reconnect_attempt`, `reconnect_error`,
+`reconnect_failed`) — socket.io emits those on the Manager, so without the
+bridge a client that exhausts `reconnectionAttempts` never learns the
+connection is gone for good.
 
 `emit()` and `emitWithAck()` reject socket.io's reserved event names
 (`connect`, `connect_error`, `disconnect`, `disconnecting`, `newListener`,
@@ -168,6 +182,7 @@ survive a demotion. Socket lifecycle events (`connect`, `disconnect`,
 | `emitWithAck(event, ...args)` | `Promise<any>` | Emit and wait for server acknowledgement |
 | `volatile()` | `this` | Mark next emission as volatile (chainable) |
 | `timeout(ms)` | `this` | Set timeout for next emission (chainable) |
+| `peers()` | `this` | Mark next `emit()` as peer-notifying — the server gets it once, and every *other* tab's `on()` listeners fire (chainable) |
 
 `volatile()` and `timeout()` apply to whichever emission comes next — `emit()`
 or `emitWithAck()` — and are consumed by it, even if that emission is rejected.
@@ -187,9 +202,14 @@ throws; it reports on `proxy_error` instead.
 | `disconnected` | `boolean` | Whether the socket is disconnected |
 | `active` | `boolean` | Whether the socket is active |
 | `id` | `string \| undefined` | The socket session ID |
+| `wantsConnection` | `boolean` | Whether the channel is *meant* to be connected — see [Deferred connections](#deferred-connections) |
 | `io` | `any` | The underlying Manager (primary only, `null` for secondary) |
 | `isPrimary` | `boolean` | Whether this tab holds the real connection |
 | `channelName` | `string` | The effective BroadcastChannel name, including the identity suffix |
+
+`SocketIOProxy.channelNameFor(channelId, url, options?)` is the static
+equivalent — it resolves the same name without constructing a proxy, for
+comparing two call sites in a test.
 
 ### Inter-Tab Messaging
 
@@ -221,6 +241,54 @@ a.channelName !== b.channelName; // true - no shared connection
 ```
 
 Pass `isolateByAuth: false` to opt out and use `channelId` verbatim.
+
+### Catching a drifted identity
+
+This is the trap worth knowing about. Two call sites meant to be the *same*
+user, differing by one key:
+
+```typescript
+// one service
+new SocketIOProxy("rtc", url, { auth: { user, token, displayName } });
+// the other — displayName omitted
+new SocketIOProxy("rtc", url, { auth: { user, token } });
+```
+
+Those resolve to different channel names, so the two tabs never hear each other
+and each opens its own socket. That is correct behaviour for two different
+users, and a silent bug when it is one user described inconsistently — and
+nothing inside the channel can detect it, because the two tabs are on different
+channels by construction.
+
+So each proxy announces its identity on a small diagnostics channel keyed by the
+raw `channelId`, and warns when a peer's identity is described with a **different
+set of keys**:
+
+```
+[SocketIOProxy] Another tab on channel "rtc" is using a different connection
+identity, so the two are NOT sharing a socket (only there: auth.displayName). ...
+```
+
+Matching keys with different *values* — two genuinely different signed-in users —
+never warn: that is what the isolation is for. Only key paths are broadcast,
+never values. Pass `warnOnIdentityMismatch: false` to skip the channel entirely.
+
+### Asserting it in a test
+
+`SocketIOProxy.channelNameFor()` resolves a configuration to its channel name
+without constructing anything, so the same mistake can fail your build instead:
+
+```typescript
+test("both services share one connection", () => {
+  expect(SocketIOProxy.channelNameFor("rtc", url, primaryOptions))
+    .toBe(SocketIOProxy.channelNameFor("rtc", url, popoutOptions));
+});
+
+test("different users stay isolated", () => {
+  expect(SocketIOProxy.channelNameFor("rtc", url, { auth: { user: "a" } }))
+    .not.toBe(SocketIOProxy.channelNameFor("rtc", url, { auth: { user: "b" } }));
+});
+```
 
 > **Limitation.** A dynamic `auth` *callback* cannot be fingerprinted — only its
 > source is visible, and that is identical across tabs even when the token it
@@ -284,6 +352,106 @@ proxy.onPrimaryCheck(() => {
 });
 ```
 
+### Reacting to connection changes
+
+Socket lifecycle events (`connect`, `disconnect`, `connect_error`) reach every
+tab, so most connection changes need nothing special. The gap is the **explicit
+push** — when the primary's state changed in a way socket.io will not announce:
+
+```typescript
+// primary: the socket is not active, so disconnect() would emit nothing
+if (proxy.active) { proxy.disconnect(); }
+else { proxy.connectionUpdate(); }
+```
+
+Every secondary learns about it by subscribing rather than polling:
+
+```typescript
+proxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, ({ connected, id, active, wantsConnection }) => {
+  updateConnectionUi(connected);
+});
+```
+
+The payload is a complete `{ connected, id, active, wantsConnection }` snapshot,
+and the getters already agree with it by the time your listener runs. It fires on every push a
+secondary applies, including one that changes nothing — the primary sends these
+deliberately, so you can rely on being told. The primary does not fire it for
+its own pushes: it is the originator, and already has `connect`/`disconnect`.
+
+### Deferred connections
+
+Pass `autoConnect: false` when the connection should wait for something — a
+user who is signed in but marked offline, a view that has not been opened yet:
+
+```typescript
+const proxy = new SocketIOProxy("app", url, { auth, autoConnect: false });
+await proxy.initialize();
+// no socket yet, in any tab
+
+proxy.connect();     // now, and from here on, the channel is meant to be up
+```
+
+The important part is what happens on **failover**. The tab that gets promoted
+is rarely the tab you called `connect()` on, so the proxy carries the *intent*
+rather than the call:
+
+| | Result on the tab promoted next |
+|---|---|
+| Some tab called `connect()` | Its socket opens, with no consumer involvement |
+| Nobody has called `connect()` | Its socket stays closed — `autoConnect: false` is honored |
+| Some tab called `disconnect()` | Its socket stays closed |
+
+Intent is channel-wide, so a new tab opened with the default `autoConnect: true`
+does **not** drag a deliberately-offline channel online: it adopts the channel's
+intent when a primary answers its election.
+
+`wantsConnection` exposes it, which is what separates a deliberate offline state
+from a broken one:
+
+```typescript
+if (!proxy.connected && proxy.wantsConnection) {
+  showReconnectingBanner();     // should be up, is not
+}
+```
+
+After `forcePrimary()`, a channel that was connected stays connected without a
+following `connect()`. The socket is *opening* when the promise resolves rather
+than already open — as with any socket.io connect — so emits made right after
+are buffered until it lands, exactly as they are on a fresh `io()`.
+
+### Forcing promotion
+
+Sometimes a particular tab must own the connection — a pop-out taking over an
+in-progress call, a mobile view that should not ride another tab's socket, or a
+"make this tab primary" control.
+
+```typescript
+await proxy.forcePrimary();
+// this tab now holds the socket; the previous primary is a normal secondary
+```
+
+The previous primary stands down first and answers once it has, so the handover
+never leaves two sockets open — there is a brief window with no primary, which
+is the safe direction to fail. If no primary answers, this tab promotes after
+`electionTimeout`. Calling it on the existing primary resolves immediately, and
+listeners registered before the call keep working.
+
+### Notifying sibling tabs
+
+`emit()` reaches the server. `peers().emit()` reaches the server **and** every
+other tab's ordinary `on()` listeners, in a single channel message:
+
+```typescript
+// in the pop-out
+proxy.peers().emit("leave-room", roomId);
+
+// in the main tab
+proxy.on("leave-room", (roomId) => clearCallState(roomId));
+```
+
+The emitting tab does not receive its own event. Use `directChannelEmit()` when
+you want to notify the other tabs *without* sending to the server at all.
+
 ### Handling Internal Errors
 
 Errors the proxy catches — a listener that throws, a malformed message from
@@ -318,11 +486,28 @@ proxy.directChannelEmit("local-update", { cached: true, data: payload });
 
 ---
 
+## Running the tests
+
+```bash
+npm test
+```
+
+Use the script rather than a bare `npx jest`. It runs jest under
+`--stack-size=2000`, and without that roughly two dozen specs fail with
+`RangeError: Maximum call stack size exceeded` — always at an
+`expect().toThrow()`, always with `source-map`'s `doQuickSort` on the stack.
+That is jest formatting a failure against V8's default stack budget, not the
+library misbehaving.
+
+---
+
 ## License
 
 Published under the [LGPL-3.0-or-later license](https://github.com/mdaemon-technologies/socket.io-client-proxy/blob/main/LICENSE "LGPL-3.0-or-later").
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+In active use in MDaemon's Webmail.
 
 Published by
 **MDaemon Technologies, Ltd.**
