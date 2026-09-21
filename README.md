@@ -1,10 +1,18 @@
-[![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmdaemon-technologies%2Fsocket.io-client-proxy%2Fmain%2Fpackage.json&query=%24.version&prefix=v&label=npm&color=blue)](https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy) [![Static Badge](https://img.shields.io/badge/node-v18%2B-blue?style=flat&label=node&color=blue)](https://nodejs.org) [![install size](https://packagephobia.com/badge?p=@mdaemon/socket.io-client-proxy)](https://packagephobia.com/result?p=@mdaemon/socket.io-client-proxy) [![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmdaemon-technologies%2Fsocket.io-client-proxy%2Fmain%2Fpackage.json&query=%24.license&prefix=v&label=license&color=green)](https://github.com/mdaemon-technologies/socket.io-client-proxy/blob/main/LICENSE) [![Node.js CI](https://github.com/mdaemon-technologies/socket.io-client-proxy/actions/workflows/node.js.yml/badge.svg)](https://github.com/mdaemon-technologies/socket.io-client-proxy/actions/workflows/node.js.yml)
-
 # @mdaemon/socket.io-client-proxy
+
+[![npm](https://img.shields.io/npm/v/@mdaemon/socket.io-client-proxy?color=blue)](https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy)
+[![license](https://img.shields.io/npm/l/@mdaemon/socket.io-client-proxy?color=green)](LICENSE)
+[![node](https://img.shields.io/node/v/@mdaemon/socket.io-client-proxy)](https://nodejs.org)
+[![install size](https://packagephobia.com/badge?p=@mdaemon/socket.io-client-proxy)](https://packagephobia.com/result?p=@mdaemon/socket.io-client-proxy)
+[![CI](https://github.com/mdaemon-technologies/socket.io-client-proxy/actions/workflows/node.js.yml/badge.svg)](https://github.com/mdaemon-technologies/socket.io-client-proxy/actions/workflows/node.js.yml)
+
+A socket.io-client proxy using BroadcastChannel to allow multiple browser tabs to use the same socket connection
 
 **Tired of every browser tab opening its own WebSocket connection?** SocketIOProxy uses the BroadcastChannel API to elect a single "primary" tab that holds the socket.io connection, while all other tabs communicate through it seamlessly.
 
 A lightweight TypeScript proxy that gives every tab full socket.io semantics (`on`, `emit`, `emitWithAck`, `connect`, `disconnect`) without multiplying server connections — tested, typed, and ready to drop in.
+
+In active use in MDaemon's Webmail.
 
 ## Why SocketIOProxy?
 
@@ -27,33 +35,30 @@ A lightweight TypeScript proxy that gives every tab full socket.io semantics (`o
 - Dashboards with real-time data where each tab doesn't need its own connection
 - Any app where users routinely have multiple tabs open to the same domain
 
----
-
 ## Install
 
 ```bash
-npm install @mdaemon/socket.io-client-proxy --save
+npm install @mdaemon/socket.io-client-proxy
 ```
 
-Both module systems resolve automatically:
+## Usage
 
-```javascript
-import SocketIOProxy from "@mdaemon/socket.io-client-proxy";   // ESM
-const SocketIOProxy = require("@mdaemon/socket.io-client-proxy"); // CommonJS
+Both module systems resolve automatically.
+
+### ES modules
+
+```js
+import SocketIOProxy from "@mdaemon/socket.io-client-proxy";
 ```
 
-### Deep imports
+### CommonJS
 
-```javascript
-// CommonJS - must be the .cjs build. The package is "type": "module", so Node
-// parses dist/*.js as ESM and the UMD wrapper's CommonJS branch never runs.
-const SocketIOProxy = require("@mdaemon/socket.io-client-proxy/dist/socket-io-proxy.umd.cjs");
-
-// ES Modules
-import SocketIOProxy from "@mdaemon/socket.io-client-proxy/dist/socket-io-proxy.mjs";
+```js
+const SocketIOProxy = require("@mdaemon/socket.io-client-proxy");
 ```
 
-### Browser
+### Browser (UMD)
+
 The UMD build expects `socket.io-client` to already be on the page as the global
 `io`, so load it first:
 
@@ -65,11 +70,20 @@ The UMD build expects `socket.io-client` to already be on the page as the global
 </script>
 ```
 
----
+### Deep imports
+
+```js
+// CommonJS - must be the .cjs build. The package is "type": "module", so Node
+// parses dist/*.js as ESM and the UMD wrapper's CommonJS branch never runs.
+const SocketIOProxy = require("@mdaemon/socket.io-client-proxy/dist/socket-io-proxy.umd.cjs");
+
+// ES Modules
+import SocketIOProxy from "@mdaemon/socket.io-client-proxy/dist/socket-io-proxy.mjs";
+```
 
 ## Quick Start
 
-```typescript
+```ts
 import SocketIOProxy from "@mdaemon/socket.io-client-proxy";
 
 const proxy = new SocketIOProxy("my-app-channel", "https://my-server.com", {
@@ -92,8 +106,6 @@ const response = await proxy.emitWithAck("request", { id: 1 });
 console.log("Server replied:", response);
 ```
 
----
-
 ## How It Works
 
 1. **Construction** — Each tab creates a `SocketIOProxy` instance with the same `channelId`. The effective channel name also includes a fingerprint of the connection identity, so tabs with different credentials are kept apart (see [Identity isolation](#identity-isolation)).
@@ -103,11 +115,9 @@ console.log("Server replied:", response);
 5. **Failover** — A primary that is closing broadcasts `PRIMARY_LEAVING`, so the remaining tabs re-elect immediately instead of waiting out the heartbeat timeout. If it dies without warning, the heartbeat timeout covers it.
 6. **Duplicate resolution** — If two tabs ever end up primary at once (both started in the same instant, or a message was lost), the one with the higher `tabId` keeps the socket and the other stands down. Heartbeats act as a backstop in case the claim itself is lost.
 
----
-
 ## Constructor
 
-```typescript
+```ts
 new SocketIOProxy(channelId: string, url: string, options?: SocketIOProxyOptions)
 ```
 
@@ -132,8 +142,6 @@ new SocketIOProxy(channelId: string, url: string, options?: SocketIOProxyOptions
 | `autoConnect` | `boolean` | `true` | Passed through to socket.io, and seeds the channel's connection intent — see [Deferred connections](#deferred-connections) |
 
 Every other option is passed straight through to `socket.io-client`.
-
----
 
 ## API Reference
 
@@ -220,8 +228,6 @@ comparing two call sites in a test.
 | `onPrimaryCheck(callback)` | `() => void` | Subscribe to other tabs checking for a primary (returns unsubscribe function) |
 | `directChannelEmit(event, ...args)` | `void` | Broadcast an EVENT to all tabs including this one, bypassing the socket |
 
----
-
 ## Identity isolation
 
 Only the elected primary's options reach `io()`. If two tabs were signed in as
@@ -234,7 +240,7 @@ To prevent that, the effective BroadcastChannel name is
 a socket exactly as before; tabs that differ land on separate channels and get
 separate connections.
 
-```typescript
+```ts
 const a = new SocketIOProxy("app", "https://server", { auth: { token: userA } });
 const b = new SocketIOProxy("app", "https://server", { auth: { token: userB } });
 a.channelName !== b.channelName; // true - no shared connection
@@ -247,7 +253,7 @@ Pass `isolateByAuth: false` to opt out and use `channelId` verbatim.
 This is the trap worth knowing about. Two call sites meant to be the *same*
 user, differing by one key:
 
-```typescript
+```ts
 // one service
 new SocketIOProxy("rtc", url, { auth: { user, token, displayName } });
 // the other — displayName omitted
@@ -264,7 +270,7 @@ So each proxy announces its identity on a small diagnostics channel keyed by the
 raw `channelId`, and warns when a peer's identity is described with a **different
 set of keys**:
 
-```
+```text
 [SocketIOProxy] Another tab on channel "rtc" is using a different connection
 identity, so the two are NOT sharing a socket (only there: auth.displayName). ...
 ```
@@ -278,7 +284,7 @@ never values. Pass `warnOnIdentityMismatch: false` to skip the channel entirely.
 `SocketIOProxy.channelNameFor()` resolves a configuration to its channel name
 without constructing anything, so the same mistake can fail your build instead:
 
-```typescript
+```ts
 test("both services share one connection", () => {
   expect(SocketIOProxy.channelNameFor("rtc", url, primaryOptions))
     .toBe(SocketIOProxy.channelNameFor("rtc", url, popoutOptions));
@@ -294,8 +300,6 @@ test("different users stay isolated", () => {
 > source is visible, and that is identical across tabs even when the token it
 > returns differs. If you authenticate with a callback, scope `channelId`
 > yourself (for example, include the account id).
-
----
 
 ## Security notes
 
@@ -314,13 +318,11 @@ test("different users stay isolated", () => {
   tabs from *accidentally* sharing a connection across principals. It does not
   defend against hostile code already running on the origin.
 
----
-
 ## Advanced Usage
 
 ### Inter-Tab Communication (beyond socket events)
 
-```typescript
+```ts
 // In any tab — send a custom message to the primary
 proxy.sendMessageToPrimary({
   eventName: "sync-request",
@@ -339,7 +341,7 @@ unsubscribe();
 
 ### Detecting Primary Role
 
-```typescript
+```ts
 await proxy.initialize();
 
 if (proxy.isPrimary) {
@@ -358,7 +360,7 @@ Socket lifecycle events (`connect`, `disconnect`, `connect_error`) reach every
 tab, so most connection changes need nothing special. The gap is the **explicit
 push** — when the primary's state changed in a way socket.io will not announce:
 
-```typescript
+```ts
 // primary: the socket is not active, so disconnect() would emit nothing
 if (proxy.active) { proxy.disconnect(); }
 else { proxy.connectionUpdate(); }
@@ -366,7 +368,7 @@ else { proxy.connectionUpdate(); }
 
 Every secondary learns about it by subscribing rather than polling:
 
-```typescript
+```ts
 proxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, ({ connected, id, active, wantsConnection }) => {
   updateConnectionUi(connected);
 });
@@ -383,7 +385,7 @@ its own pushes: it is the originator, and already has `connect`/`disconnect`.
 Pass `autoConnect: false` when the connection should wait for something — a
 user who is signed in but marked offline, a view that has not been opened yet:
 
-```typescript
+```ts
 const proxy = new SocketIOProxy("app", url, { auth, autoConnect: false });
 await proxy.initialize();
 // no socket yet, in any tab
@@ -408,7 +410,7 @@ intent when a primary answers its election.
 `wantsConnection` exposes it, which is what separates a deliberate offline state
 from a broken one:
 
-```typescript
+```ts
 if (!proxy.connected && proxy.wantsConnection) {
   showReconnectingBanner();     // should be up, is not
 }
@@ -425,7 +427,7 @@ Sometimes a particular tab must own the connection — a pop-out taking over an
 in-progress call, a mobile view that should not ride another tab's socket, or a
 "make this tab primary" control.
 
-```typescript
+```ts
 await proxy.forcePrimary();
 // this tab now holds the socket; the previous primary is a normal secondary
 ```
@@ -441,7 +443,7 @@ listeners registered before the call keep working.
 `emit()` reaches the server. `peers().emit()` reaches the server **and** every
 other tab's ordinary `on()` listeners, in a single channel message:
 
-```typescript
+```ts
 // in the pop-out
 proxy.peers().emit("leave-room", roomId);
 
@@ -458,7 +460,7 @@ Errors the proxy catches — a listener that throws, a malformed message from
 another tab — are reported on a local `proxy_error` event rather than escaping
 into the BroadcastChannel callback where nothing could catch them.
 
-```typescript
+```ts
 import SocketIOProxy from "@mdaemon/socket.io-client-proxy";
 
 proxy.on(SocketIOProxy.PROXY_ERROR_EVENT, (error, context) => {
@@ -468,7 +470,7 @@ proxy.on(SocketIOProxy.PROXY_ERROR_EVENT, (error, context) => {
 
 ### Tuning Failover
 
-```typescript
+```ts
 const proxy = new SocketIOProxy("my-app-channel", "https://my-server.com", {
   electionTimeout: 1000,   // promote faster when no primary answers
   heartbeatInterval: 2000, // primary announces itself more often
@@ -478,15 +480,15 @@ const proxy = new SocketIOProxy("my-app-channel", "https://my-server.com", {
 
 ### Direct Channel Broadcasting
 
-```typescript
+```ts
 // Emit an event to all tabs - including this one - without going through the
 // socket server.
 proxy.directChannelEmit("local-update", { cached: true, data: payload });
 ```
 
----
+## Development
 
-## Running the tests
+### Running the tests
 
 ```bash
 npm test
@@ -499,17 +501,14 @@ Use the script rather than a bare `npx jest`. It runs jest under
 That is jest formatting a failure against V8's default stack budget, not the
 library misbehaving.
 
----
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
-Published under the [LGPL-3.0-or-later license](https://github.com/mdaemon-technologies/socket.io-client-proxy/blob/main/LICENSE "LGPL-3.0-or-later").
+Published under the [LGPL-3.0-or-later](LICENSE) license.
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
-
-In active use in MDaemon's Webmail.
-
-Published by
-**MDaemon Technologies, Ltd.**
-**Simple Secure Email**
+Published by **MDaemon Technologies, Ltd.**  
+Simple Secure Email  
 [https://www.mdaemon.com](https://www.mdaemon.com)

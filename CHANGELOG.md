@@ -5,13 +5,26 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] - 2026-08-25
+## [1.2.0] - 2026-08-26
 
 Adds deterministic promotion, reconnection-event forwarding, peer-notifying
 emits and observable connection state — enough to replace a hand-rolled
 tab-sharing proxy by changing an import rather than rewriting consumers. All
-additive to the public API, but the inter-tab protocol changed — see
-[Upgrade notes](#upgrade-notes-120).
+additive to the public API, but the inter-tab protocol changed — see the
+upgrade notes below.
+
+**Upgrade notes:**
+
+- **`autoConnect: false` consumers should drop any `connect()` they added to
+  work around this.** Calling it again is harmless — intent is idempotent — but
+  it is no longer load-bearing after a promotion.
+- **Mixed 1.1.0 / 1.2.0 tabs do not interoperate.** The channel tag embeds
+  `PROTOCOL_VERSION`, so during a rollout old and new tabs each elect their own
+  primary — two connections until every tab has reloaded. The alternative,
+  treating a missing epoch as `0`, would let mixed versions coordinate but would
+  leave `forcePrimary()` unable to demote a 1.1.0 tab, which is worse.
+- **`directChannelEmit()` callers relying on 1.1.0's local dispatch** must call
+  their own handler directly. Anyone who skipped 1.1.0 sees no change from 1.0.x.
 
 ### Added
 
@@ -122,6 +135,54 @@ additive to the public API, but the inter-tab protocol changed — see
   silent, since it lands before the caller could have subscribed; the getters
   carry that state the moment `initialize()` resolves.
 
+### Changed
+
+- `PROTOCOL_VERSION` 2 → 3. `PRIMARY_CLAIM` and `HEARTBEAT` carry an `epoch`,
+  `PRIMARY_ALIVE` carries one too, `PRIMARY_DEMAND` / `PRIMARY_STOOD_DOWN` are
+  new, and `CONNECTION_STATE` / `PRIMARY_ALIVE` carry `wantsConnection`. One
+  bump covers the lot: 2 is the last published version, so 3 is simply "not 2".
+- `CONNECTION_STATUS`, `SOCKET_ID_UPDATE` and `ACTIVE_STATUS_UPDATE` are
+  replaced by a single `CONNECTION_STATE` carrying all three fields. Sent
+  separately they arrived as three messages, and a receiver acting on the first
+  would report a `connected` that did not yet match its still-stale `id` — which
+  is precisely the bug a per-message local event would have exposed. One message
+  means one coherent snapshot, and drops `connectionUpdate()` from three channel
+  posts to one.
+- **Failover no longer reopens a connection the consumer closed.** This is not
+  limited to `autoConnect: false`. Through 1.1.0, a channel that was explicitly
+  `disconnect()`ed and then lost its primary would come back up, because
+  promotion always constructed a fresh socket under the default `autoConnect`.
+  It now stays down until some tab calls `connect()`. That is the coherent
+  reading of a shared connection, but it is a behavior change for consumers who
+  never touched `autoConnect`.
+- `forcePrimary()` rejects rather than throwing synchronously when the channel
+  is closed, matching `emitWithAck()`. An async API that throws from the call
+  itself is a footgun, because `.catch()` would not catch it.
+- **Tests:** 208 → 299 specs, covering the spec's acceptance criteria directly: a forced
+  promotion across three live tabs (repeated ten times, asserting exactly one
+  socket and no stuck primary), `reconnect_failed` firing exactly once in every
+  tab, and `peers().emit` reaching the server once and the sibling tab but never
+  the sender.
+- **Tests:** `npm test` now runs jest with `--stack-size=2000`. jest's frames are large,
+  and the layered fake timers, spies and module mocks put `expect().toThrow()`
+  close enough to V8's default budget that the suite intermittently failed with
+  "Maximum call stack size exceeded" — in ~40% of full runs by the end of this
+  work. It reproduces deterministically under `--stack-size=800` on the
+  committed 1.1.0 tree too, so it is latent rather than new; the extra code here
+  simply consumed the remaining margin. The bump is headroom, not a workaround
+  for a recursion bug.
+
+  **Run the suite with `npm test`, not a bare `npx jest`.** Without the flag
+  roughly two dozen specs fail with `RangeError: Maximum call stack size
+  exceeded`, always at an `expect().toThrow()` and always with `source-map`'s
+  `doQuickSort` on the stack. That is jest formatting a failure, not the library
+  misbehaving.
+
+- **Tests:** The connection-intent specs were checked against three deliberately broken
+  implementations, so they are not decorative: removing the promotion gate fails
+  5, connecting unconditionally on promotion — the naive fix — fails 7, and
+  making intent per-tab rather than channel-wide fails 5.
+
 ### Fixed
 
 - **`autoConnect: false` is now honored on promotion.** `becomePrimary()`
@@ -153,76 +214,104 @@ additive to the public API, but the inter-tab protocol changed — see
   in a minor, and it made the natural `emit()` + `directChannelEmit()` pairing
   re-enter the emitter's own handler. It is sender-excluded again, as in 1.0.x.
 
-### Changed
-
-- `PROTOCOL_VERSION` 2 → 3. `PRIMARY_CLAIM` and `HEARTBEAT` carry an `epoch`,
-  `PRIMARY_ALIVE` carries one too, `PRIMARY_DEMAND` / `PRIMARY_STOOD_DOWN` are
-  new, and `CONNECTION_STATE` / `PRIMARY_ALIVE` carry `wantsConnection`. One
-  bump covers the lot: 2 is the last published version, so 3 is simply "not 2".
-- `CONNECTION_STATUS`, `SOCKET_ID_UPDATE` and `ACTIVE_STATUS_UPDATE` are
-  replaced by a single `CONNECTION_STATE` carrying all three fields. Sent
-  separately they arrived as three messages, and a receiver acting on the first
-  would report a `connected` that did not yet match its still-stale `id` — which
-  is precisely the bug a per-message local event would have exposed. One message
-  means one coherent snapshot, and drops `connectionUpdate()` from three channel
-  posts to one.
-- **Failover no longer reopens a connection the consumer closed.** This is not
-  limited to `autoConnect: false`. Through 1.1.0, a channel that was explicitly
-  `disconnect()`ed and then lost its primary would come back up, because
-  promotion always constructed a fresh socket under the default `autoConnect`.
-  It now stays down until some tab calls `connect()`. That is the coherent
-  reading of a shared connection, but it is a behavior change for consumers who
-  never touched `autoConnect`.
-- `forcePrimary()` rejects rather than throwing synchronously when the channel
-  is closed, matching `emitWithAck()`. An async API that throws from the call
-  itself is a footgun, because `.catch()` would not catch it.
-
-### Tests
-
-- 208 → 299 specs, covering the spec's acceptance criteria directly: a forced
-  promotion across three live tabs (repeated ten times, asserting exactly one
-  socket and no stuck primary), `reconnect_failed` firing exactly once in every
-  tab, and `peers().emit` reaching the server once and the sibling tab but never
-  the sender.
-- `npm test` now runs jest with `--stack-size=2000`. jest's frames are large,
-  and the layered fake timers, spies and module mocks put `expect().toThrow()`
-  close enough to V8's default budget that the suite intermittently failed with
-  "Maximum call stack size exceeded" — in ~40% of full runs by the end of this
-  work. It reproduces deterministically under `--stack-size=800` on the
-  committed 1.1.0 tree too, so it is latent rather than new; the extra code here
-  simply consumed the remaining margin. The bump is headroom, not a workaround
-  for a recursion bug.
-
-  **Run the suite with `npm test`, not a bare `npx jest`.** Without the flag
-  roughly two dozen specs fail with `RangeError: Maximum call stack size
-  exceeded`, always at an `expect().toThrow()` and always with `source-map`'s
-  `doQuickSort` on the stack. That is jest formatting a failure, not the library
-  misbehaving.
-
-- The connection-intent specs were checked against three deliberately broken
-  implementations, so they are not decorative: removing the promotion gate fails
-  5, connecting unconditionally on promotion — the naive fix — fails 7, and
-  making intent per-tab rather than channel-wide fails 5.
-
-### Upgrade notes {#upgrade-notes-120}
-
-- **`autoConnect: false` consumers should drop any `connect()` they added to
-  work around this.** Calling it again is harmless — intent is idempotent — but
-  it is no longer load-bearing after a promotion.
-- **Mixed 1.1.0 / 1.2.0 tabs do not interoperate.** The channel tag embeds
-  `PROTOCOL_VERSION`, so during a rollout old and new tabs each elect their own
-  primary — two connections until every tab has reloaded. The alternative,
-  treating a missing epoch as `0`, would let mixed versions coordinate but would
-  leave `forcePrimary()` unable to demote a 1.1.0 tab, which is worse.
-- **`directChannelEmit()` callers relying on 1.1.0's local dispatch** must call
-  their own handler directly. Anyone who skipped 1.1.0 sees no change from 1.0.x.
-
 ## [1.1.0] - 2026-08-25
 
 A correctness and hardening release. The public API is backward compatible —
 every existing method keeps its signature, and all new options are additive —
 but the inter-tab wire protocol changed, so please read
-[Upgrade notes](#upgrade-notes-110) before rolling this out.
+the upgrade notes below before rolling this out.
+
+**Upgrade notes:**
+
+- **Mixed versions do not interoperate.** The channel tag embeds
+  `PROTOCOL_VERSION`, so a tab on 1.0.x and a tab on 1.1.0 ignore each other and
+  each elects its own primary — two connections until every tab has reloaded.
+  This is deliberate: silently mixing the two protocols would be worse. Expect
+  it during a rollout.
+- **The BroadcastChannel name changed** to `"<channelId>#<fingerprint>"` unless
+  you pass `isolateByAuth: false`. This matters only if something outside the
+  proxy opens the same channel by name.
+- **`emit("connect")` and friends now throw.** They always threw on a primary
+  (socket.io's own behaviour); secondaries used to fail silently and crash the
+  primary instead.
+- **`sendMessageToPrimary()` now throws** when given a payload without a
+  non-empty `eventName`, rather than discarding it silently. The required shape
+  is unchanged and was already documented.
+- **`onPrimaryCheck()` is additive.** It used to replace the previous callback;
+  it now registers alongside it and returns an unsubscribe function.
+- **`emitWithAck()` now honours a pending `timeout()`/`volatile()`.** If you
+  chained one before an `emitWithAck` it used to be ignored and then leak into
+  your next `emit()`; it now applies to the `emitWithAck` itself, which can make
+  a slow acknowledgement reject where it previously hung until `ackTimeout`.
+- **CommonJS deep imports must target `.cjs`.** Bare
+  `require("@mdaemon/socket.io-client-proxy")` now works; a deep import of
+  `dist/socket-io-proxy.umd.js` must become `dist/socket-io-proxy.umd.cjs`. The
+  old path never actually worked under `require`, so nothing that worked before
+  breaks.
+
+### Added
+
+- `electionTimeout` and `electionJitter` options. The election delay was
+  previously hardcoded at 2000 ms; the jitter staggers simultaneous elections so
+  one tab wins outright rather than every tab promoting itself at once.
+- `isolateByAuth` option (default `true`) — see **Security** above.
+- `channelName` getter, exposing the effective BroadcastChannel name including
+  the connection-identity suffix.
+- `proxy_error` event (`SocketIOProxy.PROXY_ERROR_EVENT`). Internal errors the
+  proxy catches — a throwing listener, a malformed message — are reported here
+  instead of escaping into the BroadcastChannel callback where nothing could
+  catch them. Handlers receive `(error, context)`.
+- `SocketIOProxy.PROTOCOL_VERSION` static. Both statics are exposed on the class
+  rather than as named exports, so the bundle keeps a single default export and
+  `require(".../socket-io-proxy.umd.js")` still returns the class itself.
+- `ProxyMessage` interface for `sendMessageToPrimary()`.
+- `onPrimaryCheck()` now supports multiple subscribers and returns an
+  unsubscribe function, matching `onProxyMessage()`.
+- `url` is validated in the constructor, as `channelId` already was.
+- `pagehide` is observed alongside `beforeunload`, which does not fire reliably
+  on mobile or under the back/forward cache. `pageshow` undoes a departure when
+  a page is restored or a navigation is cancelled.
+- A duplicate-primary backstop: a heartbeat from an unexpected `tabId`
+  reconciles the split even if the `PRIMARY_CLAIM` was missed.
+
+### Changed
+
+- Listeners are always stored in the proxy rather than on the socket. `on()`,
+  `once()` and `off()` now behave identically whether the tab is primary or
+  secondary.
+- A listener that throws no longer aborts the dispatch to its peers; the error
+  is reported on `proxy_error`.
+- `directChannelEmit()` also dispatches to the calling tab's own listeners.
+  BroadcastChannel does not echo to the sender, so the emitting tab previously
+  never saw its own event.
+- Removed the `GET_SOCKET_ID` / `SOCKET_ID_RESPONSE` message pair. Nothing ever
+  sent the request — it was unreachable in 1.0.x too — and it is now redundant:
+  `PRIMARY_ALIVE` carries the id when a tab joins, and `SOCKET_ID_UPDATE` fires
+  on every change.
+- Internal cleanups: a single `applyFlags` helper replaces four
+  `as unknown as Socket` casts, field declarations are grouped at the top of the
+  class, and `RESERVED_EVENTS` is a `Set`. The payload-validator table is now an
+  exhaustive `Record<MessageType, …>` rather than a `Partial`, so adding a
+  message type without deciding how it is validated is a compile error instead
+  of a silently unvalidated payload.
+- **Tests:** The suite grew from 82 to 208 specs and is split across several files.
+  Registering roughly ninety or more tests in a single file overflows the stack
+  in this jest/jsdom environment — even `expect(1).toBe(1)` then fails — so the
+  split is load-bearing, not just organisational.
+- **Tests:** `@mdaemon/validate` is no longer mocked. The hand-rolled stand-in accepted
+  `undefined` for non-required string properties while the real library rejects
+  it, which is exactly what hid the `SOCKET_ID_UPDATE` bug above.
+- **Tests:** The crypto mock is counter-based, so each proxy gets a distinct `tabId`. The
+  previous constant mock gave every instance the same id, making the
+  duplicate-primary tie-break unreachable in tests.
+- **Tests:** Added a BroadcastChannel bus that really routes messages between instances, so
+  elections, split brain and failover are exercised across several live proxies
+  rather than simulated one tab at a time. It can buffer traffic, which is how
+  the split-brain regression is reproduced.
+- **Tests:** The bus clones with real structured-clone semantics rather than a JSON
+  round-trip, so a payload the proxy could not actually send between tabs fails
+  in tests too. jest's jsdom has no `structuredClone`, so a setup file supplies
+  one backed by Node's `v8` serializer.
 
 ### Fixed
 
@@ -384,110 +473,15 @@ but the inter-tab wire protocol changed, so please read
   can derive the tag and use the shared socket. Do not build a trust boundary on
   it.
 
-### Added
-
-- `electionTimeout` and `electionJitter` options. The election delay was
-  previously hardcoded at 2000 ms; the jitter staggers simultaneous elections so
-  one tab wins outright rather than every tab promoting itself at once.
-- `isolateByAuth` option (default `true`) — see **Security** above.
-- `channelName` getter, exposing the effective BroadcastChannel name including
-  the connection-identity suffix.
-- `proxy_error` event (`SocketIOProxy.PROXY_ERROR_EVENT`). Internal errors the
-  proxy catches — a throwing listener, a malformed message — are reported here
-  instead of escaping into the BroadcastChannel callback where nothing could
-  catch them. Handlers receive `(error, context)`.
-- `SocketIOProxy.PROTOCOL_VERSION` static. Both statics are exposed on the class
-  rather than as named exports, so the bundle keeps a single default export and
-  `require(".../socket-io-proxy.umd.js")` still returns the class itself.
-- `ProxyMessage` interface for `sendMessageToPrimary()`.
-- `onPrimaryCheck()` now supports multiple subscribers and returns an
-  unsubscribe function, matching `onProxyMessage()`.
-- `url` is validated in the constructor, as `channelId` already was.
-- `pagehide` is observed alongside `beforeunload`, which does not fire reliably
-  on mobile or under the back/forward cache. `pageshow` undoes a departure when
-  a page is restored or a navigation is cancelled.
-- A duplicate-primary backstop: a heartbeat from an unexpected `tabId`
-  reconciles the split even if the `PRIMARY_CLAIM` was missed.
-
-### Changed
-
-- Listeners are always stored in the proxy rather than on the socket. `on()`,
-  `once()` and `off()` now behave identically whether the tab is primary or
-  secondary.
-- A listener that throws no longer aborts the dispatch to its peers; the error
-  is reported on `proxy_error`.
-- `directChannelEmit()` also dispatches to the calling tab's own listeners.
-  BroadcastChannel does not echo to the sender, so the emitting tab previously
-  never saw its own event.
-- Removed the `GET_SOCKET_ID` / `SOCKET_ID_RESPONSE` message pair. Nothing ever
-  sent the request — it was unreachable in 1.0.x too — and it is now redundant:
-  `PRIMARY_ALIVE` carries the id when a tab joins, and `SOCKET_ID_UPDATE` fires
-  on every change.
-- Internal cleanups: a single `applyFlags` helper replaces four
-  `as unknown as Socket` casts, field declarations are grouped at the top of the
-  class, and `RESERVED_EVENTS` is a `Set`. The payload-validator table is now an
-  exhaustive `Record<MessageType, …>` rather than a `Partial`, so adding a
-  message type without deciding how it is validated is a compile error instead
-  of a silently unvalidated payload.
-
-### Tests
-
-- The suite grew from 82 to 208 specs and is split across several files.
-  Registering roughly ninety or more tests in a single file overflows the stack
-  in this jest/jsdom environment — even `expect(1).toBe(1)` then fails — so the
-  split is load-bearing, not just organisational.
-- `@mdaemon/validate` is no longer mocked. The hand-rolled stand-in accepted
-  `undefined` for non-required string properties while the real library rejects
-  it, which is exactly what hid the `SOCKET_ID_UPDATE` bug above.
-- The crypto mock is counter-based, so each proxy gets a distinct `tabId`. The
-  previous constant mock gave every instance the same id, making the
-  duplicate-primary tie-break unreachable in tests.
-- Added a BroadcastChannel bus that really routes messages between instances, so
-  elections, split brain and failover are exercised across several live proxies
-  rather than simulated one tab at a time. It can buffer traffic, which is how
-  the split-brain regression is reproduced.
-- The bus clones with real structured-clone semantics rather than a JSON
-  round-trip, so a payload the proxy could not actually send between tabs fails
-  in tests too. jest's jsdom has no `structuredClone`, so a setup file supplies
-  one backed by Node's `v8` serializer.
-
-### Upgrade notes {#upgrade-notes-110}
-
-- **Mixed versions do not interoperate.** The channel tag embeds
-  `PROTOCOL_VERSION`, so a tab on 1.0.x and a tab on 1.1.0 ignore each other and
-  each elects its own primary — two connections until every tab has reloaded.
-  This is deliberate: silently mixing the two protocols would be worse. Expect
-  it during a rollout.
-- **The BroadcastChannel name changed** to `"<channelId>#<fingerprint>"` unless
-  you pass `isolateByAuth: false`. This matters only if something outside the
-  proxy opens the same channel by name.
-- **`emit("connect")` and friends now throw.** They always threw on a primary
-  (socket.io's own behaviour); secondaries used to fail silently and crash the
-  primary instead.
-- **`sendMessageToPrimary()` now throws** when given a payload without a
-  non-empty `eventName`, rather than discarding it silently. The required shape
-  is unchanged and was already documented.
-- **`onPrimaryCheck()` is additive.** It used to replace the previous callback;
-  it now registers alongside it and returns an unsubscribe function.
-- **`emitWithAck()` now honours a pending `timeout()`/`volatile()`.** If you
-  chained one before an `emitWithAck` it used to be ignored and then leak into
-  your next `emit()`; it now applies to the `emitWithAck` itself, which can make
-  a slow acknowledgement reject where it previously hung until `ackTimeout`.
-- **CommonJS deep imports must target `.cjs`.** Bare
-  `require("@mdaemon/socket.io-client-proxy")` now works; a deep import of
-  `dist/socket-io-proxy.umd.js` must become `dist/socket-io-proxy.umd.cjs`. The
-  old path never actually worked under `require`, so nothing that worked before
-  breaks.
-
-## [1.0.2] - 2026-05-19
+## [1.0.1] - 2026-06-01
 
 - README badge and link corrections.
 
-## [1.0.1]
+## [1.0.0] - 2026-05-19
 
-- Initial published releases.
+- Initial published release.
 
-[1.2.0]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.2.0
-[1.1.0]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.1.0
-[1.0.2]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.0.2
-[1.0.1]: https://github.com/mdaemon-technologies/socket.io-client-proxy/releases/tag/v1.0.1
+[1.2.0]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.2.0
+[1.1.0]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.1.0
+[1.0.1]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.0.1
+[1.0.0]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.0.0
