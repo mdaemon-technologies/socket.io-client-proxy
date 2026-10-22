@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@mdaemon/socket.io-client-proxy?color=blue)](https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy)
 [![license](https://img.shields.io/npm/l/@mdaemon/socket.io-client-proxy?color=green)](LICENSE)
 [![node](https://img.shields.io/node/v/@mdaemon/socket.io-client-proxy)](https://nodejs.org)
-[![install size](https://packagephobia.com/badge?p=@mdaemon/socket.io-client-proxy)](https://packagephobia.com/result?p=@mdaemon/socket.io-client-proxy)
+[![install size](https://img.shields.io/npm/unpacked-size/@mdaemon/socket.io-client-proxy)](https://packagephobia.com/result?p=@mdaemon/socket.io-client-proxy)
 [![CI](https://github.com/mdaemon-technologies/socket.io-client-proxy/actions/workflows/node.js.yml/badge.svg)](https://github.com/mdaemon-technologies/socket.io-client-proxy/actions/workflows/node.js.yml)
 
 A socket.io-client proxy using BroadcastChannel to allow multiple browser tabs to use the same socket connection
