@@ -1,6 +1,6 @@
 import SocketIOProxy from '../socket-io-proxy';
 import { io } from 'socket.io-client';
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, test, expect, beforeEach, afterEach, type Mock } from 'vitest';
 import {
   Harness,
   installFakes,
@@ -12,7 +12,7 @@ import {
   connectionState,
 } from './helpers/harness';
 
-jest.mock('socket.io-client');
+vi.mock('socket.io-client');
 
 describe('construction and initialization', () => {
   let h: Harness;
@@ -132,7 +132,7 @@ describe('construction and initialization', () => {
     });
 
     test('opens no channel', () => {
-      (globalThis.BroadcastChannel as jest.Mock).mockClear();
+      (globalThis.BroadcastChannel as Mock).mockClear();
       SocketIOProxy.channelNameFor('app', 'ws://host');
       expect(globalThis.BroadcastChannel).not.toHaveBeenCalled();
     });
@@ -254,19 +254,19 @@ describe('construction and initialization', () => {
     });
 
     test('warnOnIdentityMismatch: false opens no lobby at all', () => {
-      (globalThis.BroadcastChannel as jest.Mock).mockClear();
+      (globalThis.BroadcastChannel as Mock).mockClear();
       new SocketIOProxy('rtc', 'ws://host', { warnOnIdentityMismatch: false });
 
-      const names = (globalThis.BroadcastChannel as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+      const names = (globalThis.BroadcastChannel as Mock).mock.calls.map((c: any[]) => c[0]);
       expect(names.some((n: string) => n.endsWith(LOBBY))).toBe(false);
     });
 
     test('isolateByAuth: false opens no lobby either', () => {
       // Nothing to detect: every tab uses the channel id verbatim.
-      (globalThis.BroadcastChannel as jest.Mock).mockClear();
+      (globalThis.BroadcastChannel as Mock).mockClear();
       new SocketIOProxy('rtc', 'ws://host', { isolateByAuth: false });
 
-      const names = (globalThis.BroadcastChannel as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+      const names = (globalThis.BroadcastChannel as Mock).mock.calls.map((c: any[]) => c[0]);
       expect(names.some((n: string) => n.endsWith(LOBBY))).toBe(false);
     });
 
@@ -309,7 +309,7 @@ describe('construction and initialization', () => {
     test('messages with a missing tag are rejected', async () => {
       await electAsPrimary(socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       h.mockChannel.onmessage({ data: { type: 'EVENT', data: { event: 'test-event', args: ['x'] } } });
       expect(callback).not.toHaveBeenCalled();
@@ -318,7 +318,7 @@ describe('construction and initialization', () => {
     test('messages with a wrong tag are rejected', async () => {
       await electAsPrimary(socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       h.mockChannel.onmessage({
         data: { type: 'EVENT', data: { event: 'test-event', args: ['x'] }, token: 'wrong-token' },
@@ -353,7 +353,7 @@ describe('construction and initialization', () => {
       });
 
       const promise = victim.initialize();
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await promise;
 
       expect(getToken(victim)).toBe(original);
@@ -364,7 +364,7 @@ describe('construction and initialization', () => {
     test('messages with the correct tag are accepted', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
 
       h.mockChannel.onmessage({
@@ -391,7 +391,7 @@ describe('construction and initialization', () => {
       const second = socketProxy.initialize();
       expect(first).toBe(second);
 
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await Promise.all([first, second]);
 
       expect(socketProxy.isPrimary).toBe(true);
@@ -407,26 +407,26 @@ describe('construction and initialization', () => {
       const fast = new SocketIOProxy('fast-channel', 'ws://test-url', { electionTimeout: 200 });
       const promise = fast.initialize();
 
-      jest.advanceTimersByTime(199);
+      vi.advanceTimersByTime(199);
       expect(fast.isPrimary).toBe(false);
 
-      jest.advanceTimersByTime(1);
+      vi.advanceTimersByTime(1);
       await promise;
       expect(fast.isPrimary).toBe(true);
     });
 
     test('election jitter is bounded by electionJitter', async () => {
-      (Math.random as jest.Mock).mockReturnValue(0.999999);
+      (Math.random as Mock).mockReturnValue(0.999999);
       const jittered = new SocketIOProxy('jitter-channel', 'ws://test-url', {
         electionTimeout: 1000,
         electionJitter: 100,
       });
       const promise = jittered.initialize();
 
-      jest.advanceTimersByTime(1099);
+      vi.advanceTimersByTime(1099);
       expect(jittered.isPrimary).toBe(false);
 
-      jest.advanceTimersByTime(1);
+      vi.advanceTimersByTime(1);
       await promise;
       expect(jittered.isPrimary).toBe(true);
     });
@@ -434,7 +434,7 @@ describe('construction and initialization', () => {
     test('messages arriving before initialize() are still handled', () => {
       // The handler is installed in the constructor, so nothing is dropped
       // while the election is pending.
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('early', callback);
       h.mockChannel.onmessage({
         data: { type: 'EVENT', data: { event: 'early', args: ['x'] }, token: getToken(socketProxy) },
@@ -446,7 +446,7 @@ describe('construction and initialization', () => {
       // It lands mid-initialize(), before the caller could have subscribed; the
       // getters carry it the moment initialize() resolves.
       const fresh = new SocketIOProxy('quiet-channel', 'ws://test-url');
-      const listener = jest.fn();
+      const listener = vi.fn();
       fresh.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
 
       await joinAsSecondary(h.mockChannel, fresh, { connected: true, active: true, id: 'live-id' });
@@ -510,7 +510,7 @@ describe('construction and initialization', () => {
     test('closes a socket a cached Manager opened against the channel wishes', async () => {
       // io() caches Managers by url, so a Manager built elsewhere with
       // autoConnect true will open this socket no matter what we pass.
-      (io as jest.Mock).mockImplementation(() => h.mockSocket);
+      (io as Mock).mockImplementation(() => h.mockSocket);
       h.mockSocket.connected = true;
       h.mockSocket.active = true;
 
@@ -570,14 +570,14 @@ describe('construction and initialization', () => {
 
   describe('debug option', () => {
     test('does not log when debug is false (default)', async () => {
-      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       await electAsPrimary(socketProxy);
       expect(logSpy).not.toHaveBeenCalled();
     });
 
     test('logs when debug is true', async () => {
       const debugProxy = new SocketIOProxy('debug-ch', 'ws://test-url', { debug: true });
-      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       await electAsPrimary(debugProxy);
 
       const logged = logSpy.mock.calls.map((c: any[]) => c.join(' '));
@@ -585,7 +585,7 @@ describe('construction and initialization', () => {
     });
 
     test('logs rejected messages when debug is enabled', async () => {
-      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       const debugProxy = new SocketIOProxy('debug-channel', 'ws://test-url', { debug: true });
       await electAsPrimary(debugProxy);
 

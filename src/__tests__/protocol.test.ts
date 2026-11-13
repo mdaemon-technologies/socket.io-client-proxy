@@ -1,5 +1,5 @@
 import SocketIOProxy from '../socket-io-proxy';
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, test, expect, beforeEach, afterEach } from 'vitest';
 import {
   Harness,
   installFakes,
@@ -13,7 +13,7 @@ import {
   connectionState,
 } from './helpers/harness';
 
-jest.mock('socket.io-client');
+vi.mock('socket.io-client');
 
 describe('wire protocol', () => {
   let h: Harness;
@@ -32,7 +32,7 @@ describe('wire protocol', () => {
     });
 
     test('forwards connect to secondaries and local listeners', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('connect', callback);
       h.mockChannel.postMessage.mockClear();
 
@@ -45,7 +45,7 @@ describe('wire protocol', () => {
     });
 
     test('forwards disconnect with its reason', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('disconnect', callback);
       h.mockChannel.postMessage.mockClear();
 
@@ -58,7 +58,7 @@ describe('wire protocol', () => {
     });
 
     test('forwards connect_error, which onAny never sees', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('connect_error', callback);
       h.mockChannel.postMessage.mockClear();
 
@@ -108,9 +108,9 @@ describe('wire protocol', () => {
     test('a payload that cannot be cloned surfaces as proxy_error, not a throw', () => {
       // Throwing here would escape into socket.io's dispatch loop and break
       // event delivery for the whole tab.
-      const onError = jest.fn();
+      const onError = vi.fn();
       socketProxy.on(SocketIOProxy.PROXY_ERROR_EVENT, onError);
-      const local = jest.fn();
+      const local = vi.fn();
       socketProxy.on('bulky', local);
 
       h.mockChannel.postMessage.mockImplementation(() => {
@@ -131,7 +131,7 @@ describe('wire protocol', () => {
     test('connectionUpdate() does not fire the event on the primary itself', () => {
       // The primary is the originator: it already knows, and it has
       // connect/disconnect for socket-driven changes.
-      const listener = jest.fn();
+      const listener = vi.fn();
       socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
 
       socketProxy.connectionUpdate();
@@ -203,7 +203,7 @@ describe('wire protocol', () => {
 
     test.each(['reconnect', 'reconnect_attempt', 'reconnect_error', 'reconnect_failed'])(
       'bridges %s from the Manager', (event) => {
-        const callback = jest.fn();
+        const callback = vi.fn();
         socketProxy.on(event, callback);
         h.mockChannel.postMessage.mockClear();
 
@@ -220,7 +220,7 @@ describe('wire protocol', () => {
       const secondary = new SocketIOProxy('test-channel', 'ws://test-url');
       await joinAsSecondary(h.mockChannel, secondary);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       secondary.on('reconnect_failed', callback);
 
       h.mockChannel.onmessage(msg(secondary, {
@@ -250,7 +250,7 @@ describe('wire protocol', () => {
 
     test('a demoted tab does not relay manager events', () => {
       const handler = managerHandler('reconnect_failed');
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('reconnect_failed', callback);
 
       h.mockChannel.onmessage(msg(socketProxy, {
@@ -300,7 +300,7 @@ describe('wire protocol', () => {
     });
 
     test('applies forwarded timeout and volatile flags', () => {
-      const volatileEmit = jest.fn();
+      const volatileEmit = vi.fn();
       h.mockSocket.timeout.mockReturnValue({ volatile: { emit: volatileEmit } });
 
       h.mockChannel.onmessage(msg(socketProxy, {
@@ -329,7 +329,7 @@ describe('wire protocol', () => {
         type: 'EMIT_WITH_ACK', data: { event: 'req', args: ['x'], id: 'abc123' },
       }));
 
-      await jest.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
 
       expect(h.mockSocket.emitWithAck).toHaveBeenCalledWith('req', 'x');
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
@@ -340,14 +340,14 @@ describe('wire protocol', () => {
     });
 
     test('applies forwarded flags to a forwarded EMIT_WITH_ACK', async () => {
-      const emitWithAck = jest.fn<any>().mockResolvedValue('acked');
+      const emitWithAck = vi.fn().mockResolvedValue('acked');
       h.mockSocket.timeout.mockReturnValue({ emitWithAck });
       h.mockChannel.postMessage.mockClear();
 
       h.mockChannel.onmessage(msg(socketProxy, {
         type: 'EMIT_WITH_ACK', data: { event: 'req', args: ['x'], id: 'f1', timeout: 250 },
       }));
-      await jest.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
 
       expect(h.mockSocket.timeout).toHaveBeenCalledWith(250);
       expect(emitWithAck).toHaveBeenCalledWith('req', 'x');
@@ -365,7 +365,7 @@ describe('wire protocol', () => {
       h.mockChannel.onmessage(msg(socketProxy, {
         type: 'EMIT_WITH_ACK', data: { event: 'fail', args: [], id: 'err-id' },
       }));
-      await jest.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
 
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -386,7 +386,7 @@ describe('wire protocol', () => {
     });
 
     test('publishes on MESSAGE_TO_PRIMARY', () => {
-      const subscriber = jest.fn();
+      const subscriber = vi.fn();
       socketProxy.onProxyMessage('chat', subscriber);
 
       h.mockChannel.onmessage(msg(socketProxy, {
@@ -431,7 +431,7 @@ describe('wire protocol', () => {
     });
 
     test('fires connection_state_changed with the full snapshot', () => {
-      const listener = jest.fn();
+      const listener = vi.fn();
       socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
 
       h.mockChannel.onmessage(connectionState(socketProxy, {
@@ -445,7 +445,7 @@ describe('wire protocol', () => {
     });
 
     test('reports the cleared id as undefined, not the wire sentinel', () => {
-      const listener = jest.fn();
+      const listener = vi.fn();
       socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
 
       h.mockChannel.onmessage(connectionState(socketProxy, {
@@ -480,7 +480,7 @@ describe('wire protocol', () => {
     test('fires on every push, including one that changes nothing', () => {
       // The primary sends these deliberately, so a receiver must not suppress
       // an unchanged snapshot — the caller has to be able to rely on being told.
-      const listener = jest.fn();
+      const listener = vi.fn();
       socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
 
       const same = { connected: false, active: false, id: '' };
@@ -530,21 +530,21 @@ describe('wire protocol', () => {
     }
 
     test('rejects an unknown message type', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       bad({ type: 'INVALID_TYPE', data: { event: 'test-event', args: ['x'] } });
       expect(callback).not.toHaveBeenCalled();
     });
 
     test('rejects a missing message type', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       bad({ data: { event: 'test-event', args: ['x'] } });
       expect(callback).not.toHaveBeenCalled();
     });
 
     test('rejects null and non-object payloads', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       h.mockChannel.onmessage({ data: null });
       h.mockChannel.onmessage({ data: 'not-an-object' });
@@ -567,14 +567,14 @@ describe('wire protocol', () => {
     });
 
     test('rejects EVENT with a missing event field', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       bad({ type: 'EVENT', data: { args: ['x'] } });
       expect(callback).not.toHaveBeenCalled();
     });
 
     test('rejects EVENT with non-array args', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       bad({ type: 'EVENT', data: { event: 'test-event', args: 'not-array' } });
       expect(callback).not.toHaveBeenCalled();
@@ -588,7 +588,7 @@ describe('wire protocol', () => {
     test('rejects a CONNECTION_STATE missing any of its fields', () => {
       // Partial state is what made several separate messages a problem; the
       // collapsed message must be all-or-nothing.
-      const listener = jest.fn();
+      const listener = vi.fn();
       socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
 
       bad({ type: 'CONNECTION_STATE', data: { connected: true, active: true, id: '' } });
@@ -600,7 +600,7 @@ describe('wire protocol', () => {
     });
 
     test('rejects a CONNECTION_STATE with a non-boolean wantsConnection', () => {
-      const listener = jest.fn();
+      const listener = vi.fn();
       socketProxy.on(SocketIOProxy.CONNECTION_STATE_EVENT, listener);
       bad({
         type: 'CONNECTION_STATE',
@@ -615,7 +615,7 @@ describe('wire protocol', () => {
     });
 
     test('rejects MESSAGE_TO_PRIMARY with a missing eventName', () => {
-      const subscriber = jest.fn();
+      const subscriber = vi.fn();
       socketProxy.onProxyMessage('chat', subscriber);
       bad({ type: 'MESSAGE_TO_PRIMARY', data: { message: 'hi' } });
       expect(subscriber).not.toHaveBeenCalled();
@@ -658,7 +658,7 @@ describe('wire protocol', () => {
       });
 
       const promise = fresh.initialize();
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await promise;
 
       // The malformed answer is discarded, so the tab still promotes itself.
@@ -673,7 +673,7 @@ describe('wire protocol', () => {
     });
 
     test('does not log rejections when debug is disabled (default)', () => {
-      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
       h.mockChannel.onmessage({ data: { type: 'BOGUS' } });
       expect(logSpy).not.toHaveBeenCalled();
     });

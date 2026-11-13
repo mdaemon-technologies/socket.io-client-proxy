@@ -1,5 +1,5 @@
 import SocketIOProxy from '../socket-io-proxy';
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, test, expect, beforeEach, afterEach } from 'vitest';
 import {
   Harness,
   installFakes,
@@ -10,7 +10,7 @@ import {
   msg,
 } from './helpers/harness';
 
-jest.mock('socket.io-client');
+vi.mock('socket.io-client');
 
 const PROXY_ERROR_EVENT = SocketIOProxy.PROXY_ERROR_EVENT;
 
@@ -36,7 +36,7 @@ describe('listeners and inter-tab messaging', () => {
   describe('on / off / once', () => {
     test('listeners are stored locally even when primary', async () => {
       await electAsPrimary(socketProxy);
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
 
       expect(listenersFor(socketProxy, 'test-event')).toContain(callback);
@@ -46,7 +46,7 @@ describe('listeners and inter-tab messaging', () => {
 
     test('primary dispatches socket events to local listeners via onAny', async () => {
       await electAsPrimary(socketProxy);
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('chat', callback);
 
       onAnyHandler()('chat', 'hello');
@@ -56,7 +56,7 @@ describe('listeners and inter-tab messaging', () => {
     test('stores listeners locally when secondary', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('test-event', callback);
       expect(listenersFor(socketProxy, 'test-event')).toContain(callback);
     });
@@ -64,8 +64,8 @@ describe('listeners and inter-tab messaging', () => {
     test('removes a specific listener', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback1 = jest.fn();
-      const callback2 = jest.fn();
+      const callback1 = vi.fn();
+      const callback2 = vi.fn();
       socketProxy.on('test-event', callback1);
       socketProxy.on('test-event', callback2);
       socketProxy.off('test-event', callback1);
@@ -77,7 +77,7 @@ describe('listeners and inter-tab messaging', () => {
     test('off removes a callback registered while primary', async () => {
       await electAsPrimary(socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('chat', callback);
       socketProxy.off('chat', callback);
 
@@ -88,20 +88,20 @@ describe('listeners and inter-tab messaging', () => {
     test('off without a callback removes every listener for the event', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      socketProxy.on('test-event', jest.fn());
+      socketProxy.on('test-event', vi.fn());
       socketProxy.off('test-event');
       expect(listenersFor(socketProxy, 'test-event')).toBeUndefined();
     });
 
     test('off is a no-op for an unknown event or callback', () => {
-      expect(() => socketProxy.off('never-registered', jest.fn())).not.toThrow();
+      expect(() => socketProxy.off('never-registered', vi.fn())).not.toThrow();
       expect(() => socketProxy.off('never-registered')).not.toThrow();
     });
 
     test('duplicate registrations of the same callback both fire', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('dup', callback);
       socketProxy.on('dup', callback);
 
@@ -112,7 +112,7 @@ describe('listeners and inter-tab messaging', () => {
     test('once fires only once via EVENT broadcast', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.once('test-event', callback);
 
       sendEvent('test-event', 'payload');
@@ -125,7 +125,7 @@ describe('listeners and inter-tab messaging', () => {
     test('once fires only once for a primary too', async () => {
       await electAsPrimary(socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.once('ping', callback);
 
       onAnyHandler()('ping', 1);
@@ -137,7 +137,7 @@ describe('listeners and inter-tab messaging', () => {
     test('dispatches EVENT messages to registered listeners', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('chat', callback);
 
       sendEvent('chat', 'hello', 'world');
@@ -147,8 +147,8 @@ describe('listeners and inter-tab messaging', () => {
     test('a listener unsubscribing mid-dispatch does not skip its peers', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const second = jest.fn();
-      const first = jest.fn(() => socketProxy.off('burst', first));
+      const second = vi.fn();
+      const first = vi.fn(() => socketProxy.off('burst', first));
       socketProxy.on('burst', first);
       socketProxy.on('burst', second);
 
@@ -164,7 +164,7 @@ describe('listeners and inter-tab messaging', () => {
     test.each(proto)('on("%s") registers and dispatches without throwing', async (name) => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       expect(() => socketProxy.on(name, callback)).not.toThrow();
 
       sendEvent(name, 'x');
@@ -179,7 +179,7 @@ describe('listeners and inter-tab messaging', () => {
     test('off works for prototype-chain names', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('__proto__', callback);
       socketProxy.off('__proto__', callback);
 
@@ -188,7 +188,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('onProxyMessage tolerates prototype-chain event names', () => {
-      const subscriber = jest.fn();
+      const subscriber = vi.fn();
       socketProxy.onProxyMessage('__proto__', subscriber);
       (socketProxy as any).publishMessage('__proto__', 'x');
       expect(subscriber).toHaveBeenCalledWith('x');
@@ -201,7 +201,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('a throwing listener does not break the message handler', () => {
-      const good = jest.fn();
+      const good = vi.fn();
       socketProxy.on('boom', () => { throw new Error('listener blew up'); });
       socketProxy.on('boom', good);
 
@@ -210,7 +210,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('listener failures surface on the proxy_error event', () => {
-      const onError = jest.fn();
+      const onError = vi.fn();
       socketProxy.on(PROXY_ERROR_EVENT, onError);
       socketProxy.on('boom', () => { throw new Error('listener blew up'); });
 
@@ -232,7 +232,7 @@ describe('listeners and inter-tab messaging', () => {
 
   describe('onProxyMessage / publishMessage', () => {
     test('subscribes and unsubscribes', () => {
-      const subscriber = jest.fn();
+      const subscriber = vi.fn();
       const unsubscribe = socketProxy.onProxyMessage('test-event', subscriber);
 
       (socketProxy as any).publishMessage('test-event', 'test-data');
@@ -244,7 +244,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('unsubscribing twice is harmless', () => {
-      const unsubscribe = socketProxy.onProxyMessage('topic', jest.fn());
+      const unsubscribe = socketProxy.onProxyMessage('topic', vi.fn());
       unsubscribe();
       expect(() => unsubscribe()).not.toThrow();
     });
@@ -252,7 +252,7 @@ describe('listeners and inter-tab messaging', () => {
     test('a throwing subscriber does not stop the others', async () => {
       await electAsPrimary(socketProxy);
 
-      const good = jest.fn();
+      const good = vi.fn();
       socketProxy.onProxyMessage('topic', () => { throw new Error('subscriber blew up'); });
       socketProxy.onProxyMessage('topic', good);
 
@@ -279,7 +279,7 @@ describe('listeners and inter-tab messaging', () => {
     test('delivers locally when called on the primary', async () => {
       await electAsPrimary(socketProxy);
 
-      const subscriber = jest.fn();
+      const subscriber = vi.fn();
       socketProxy.onProxyMessage('sync', subscriber);
       h.mockChannel.postMessage.mockClear();
 
@@ -305,7 +305,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('notifies on PRIMARY_CHECK', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.onPrimaryCheck(callback);
 
       h.mockChannel.onmessage(msg(socketProxy, { type: 'PRIMARY_CHECK' }));
@@ -313,8 +313,8 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('supports multiple subscribers', () => {
-      const first = jest.fn();
-      const second = jest.fn();
+      const first = vi.fn();
+      const second = vi.fn();
       socketProxy.onPrimaryCheck(first);
       socketProxy.onPrimaryCheck(second);
 
@@ -324,7 +324,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('returns an unsubscribe function', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       const unsubscribe = socketProxy.onPrimaryCheck(callback);
       unsubscribe();
 
@@ -333,7 +333,7 @@ describe('listeners and inter-tab messaging', () => {
     });
 
     test('a throwing subscriber does not stop the others', () => {
-      const good = jest.fn();
+      const good = vi.fn();
       socketProxy.onPrimaryCheck(() => { throw new Error('bad subscriber'); });
       socketProxy.onPrimaryCheck(good);
 
@@ -353,7 +353,7 @@ describe('listeners and inter-tab messaging', () => {
     test('does not dispatch to the calling tab own listeners', () => {
       // Sender-excluded, as in 1.0.x: 1.1.0 briefly dispatched locally, which
       // made an emit()+directChannelEmit() pairing re-enter the emitter.
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('custom-event', callback);
       socketProxy.directChannelEmit('custom-event', 'payload');
       expect(callback).not.toHaveBeenCalled();

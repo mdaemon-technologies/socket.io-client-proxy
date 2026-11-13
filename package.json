@@ -1,6 +1,6 @@
 {
   "name": "@mdaemon/socket.io-client-proxy",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "A socket.io-client proxy using BroadcastChannel to allow multiple browser tabs to use the same socket connection",
   "type": "module",
   "main": "dist/socket-io-proxy.umd.cjs",
@@ -11,10 +11,12 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rollup -c",
-    "dev": "rollup -c -w",
-    "test": "node --stack-size=2000 node_modules/jest/bin/jest.js",
-    "watch": "node --stack-size=2000 node_modules/jest/bin/jest.js --watchAll",
+    "build": "vite build && tsc -p tsconfig.json --emitDeclarationOnly",
+    "dev": "vite build --watch",
+    "test": "vitest run",
+    "watch": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test:smoke": "node smoke/smoke.test.cjs && node smoke/smoke.test.mjs && node smoke/smoke.test.umd.cjs",
     "pub": "npm run build && npm run test && npm publish"
   },
   "repository": {
@@ -44,22 +46,19 @@
   },
   "homepage": "https://github.com/mdaemon-technologies/socket.io-client-proxy#readme",
   "devDependencies": {
-    "@rollup/plugin-node-resolve": "^15.2.3",
-    "@rollup/plugin-typescript": "^11.1.6",
-    "jest": "^30.4.2",
-    "jest-environment-jsdom": "^30.4.1",
-    "jest-util": "^30.4.1",
-    "rollup": "^2.79.1",
-    "rollup-plugin-esbuild": "^6.2.1",
-    "ts-jest": "^29.4.10",
-    "ts-node": "^10.9.2",
-    "tslib": "^2.7.0",
-    "typescript": "^6.0.0"
+    "jsdom": "^31.0.1",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.0"
   },
   "dependencies": {
     "@mdaemon/validate": "^3.3.6",
     "socket.io-client": "^4.8.3"
   },
+  "files": [
+    "dist",
+    "CHANGELOG.md"
+  ],
   "exports": {
     ".": {
       "types": "./dist/socket-io-proxy.d.ts",

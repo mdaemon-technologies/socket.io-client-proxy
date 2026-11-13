@@ -1,5 +1,5 @@
 import SocketIOProxy from '../socket-io-proxy';
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, test, expect, beforeEach, afterEach } from 'vitest';
 import {
   Harness,
   installFakes,
@@ -9,7 +9,7 @@ import {
   msg,
 } from './helpers/harness';
 
-jest.mock('socket.io-client');
+vi.mock('socket.io-client');
 
 describe('emit and emitWithAck', () => {
   let h: Harness;
@@ -83,7 +83,7 @@ describe('emit and emitWithAck', () => {
     test('the emitting tab does not receive its own event', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('leave-room', callback);
       socketProxy.peers().emit('leave-room', 'room-1');
 
@@ -93,7 +93,7 @@ describe('emit and emitWithAck', () => {
     test('a receiving tab hands it to ordinary on() listeners', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('set-user-status', callback);
 
       h.mockChannel.onmessage(msg(socketProxy, {
@@ -105,7 +105,7 @@ describe('emit and emitWithAck', () => {
     test('the primary relays it to the server and to its own listeners', async () => {
       await electAsPrimary(socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('invite-to-call', callback);
 
       h.mockChannel.onmessage(msg(socketProxy, {
@@ -119,7 +119,7 @@ describe('emit and emitWithAck', () => {
     test('a plain EMIT is not handed to listeners', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('plain', callback);
 
       h.mockChannel.onmessage(msg(socketProxy, {
@@ -177,7 +177,7 @@ describe('emit and emitWithAck', () => {
     });
 
     test('volatile().emit() uses socket.volatile.emit', () => {
-      const volatileEmit = jest.fn();
+      const volatileEmit = vi.fn();
       h.mockSocket.volatile = { emit: volatileEmit };
 
       socketProxy.volatile().emit('test-event', 'arg1');
@@ -186,8 +186,8 @@ describe('emit and emitWithAck', () => {
     });
 
     test('timeout().emit() uses socket.timeout().emit', () => {
-      const timeoutEmit = jest.fn();
-      h.mockSocket.timeout.mockReturnValue({ emit: timeoutEmit, volatile: { emit: jest.fn() } });
+      const timeoutEmit = vi.fn();
+      h.mockSocket.timeout.mockReturnValue({ emit: timeoutEmit, volatile: { emit: vi.fn() } });
 
       socketProxy.timeout(5000).emit('test-event', 'arg1');
       expect(h.mockSocket.timeout).toHaveBeenCalledWith(5000);
@@ -195,7 +195,7 @@ describe('emit and emitWithAck', () => {
     });
 
     test('flags reset after an emit', () => {
-      const volatileEmit = jest.fn();
+      const volatileEmit = vi.fn();
       h.mockSocket.volatile = { emit: volatileEmit };
 
       socketProxy.volatile().emit('first', 'a');
@@ -269,7 +269,7 @@ describe('emit and emitWithAck', () => {
     });
 
     test('applies a pending timeout flag, as socket.io does', async () => {
-      const emitWithAck = jest.fn<any>().mockResolvedValue('ok');
+      const emitWithAck = vi.fn().mockResolvedValue('ok');
       h.mockSocket.timeout.mockReturnValue({ emitWithAck });
 
       await expect(socketProxy.timeout(500).emitWithAck('slow')).resolves.toBe('ok');
@@ -278,7 +278,7 @@ describe('emit and emitWithAck', () => {
     });
 
     test('applies a pending volatile flag', async () => {
-      const emitWithAck = jest.fn<any>().mockResolvedValue('ok');
+      const emitWithAck = vi.fn().mockResolvedValue('ok');
       h.mockSocket.volatile = { emitWithAck };
 
       await expect(socketProxy.volatile().emitWithAck('maybe')).resolves.toBe('ok');
@@ -286,7 +286,7 @@ describe('emit and emitWithAck', () => {
     });
 
     test('consumes the flags so they do not leak into the next emit', async () => {
-      const emitWithAck = jest.fn<any>().mockResolvedValue('ok');
+      const emitWithAck = vi.fn().mockResolvedValue('ok');
       h.mockSocket.timeout.mockReturnValue({ emitWithAck });
       await socketProxy.timeout(500).emitWithAck('first');
 
@@ -360,7 +360,7 @@ describe('emit and emitWithAck', () => {
       expect((socketProxy as any).pendingAcks.size).toBe(0);
 
       // A leaked timer would fire here and reject an already-settled promise.
-      expect(() => jest.advanceTimersByTime(20000)).not.toThrow();
+      expect(() => vi.advanceTimersByTime(20000)).not.toThrow();
     });
 
     test('posts EMIT_WITH_ACK and resolves on response', async () => {
@@ -404,7 +404,7 @@ describe('emit and emitWithAck', () => {
 
     test('rejects with a timeout error when the primary never responds', async () => {
       const resultPromise = socketProxy.emitWithAck('test-event', 'data');
-      jest.advanceTimersByTime(10000);
+      vi.advanceTimersByTime(10000);
       await expect(resultPromise).rejects.toThrow('emitWithAck timed out waiting for primary response');
     });
 
@@ -413,8 +413,8 @@ describe('emit and emitWithAck', () => {
       await joinAsSecondary(h.mockChannel, customProxy);
 
       const resultPromise = customProxy.emitWithAck('test-event', 'data');
-      jest.advanceTimersByTime(4999);
-      jest.advanceTimersByTime(1);
+      vi.advanceTimersByTime(4999);
+      vi.advanceTimersByTime(1);
 
       await expect(resultPromise).rejects.toThrow('emitWithAck timed out waiting for primary response');
     });
@@ -424,14 +424,14 @@ describe('emit and emitWithAck', () => {
       respond({ id: lastAckId(), response: 'ok' });
       await expect(resultPromise).resolves.toBe('ok');
 
-      jest.advanceTimersByTime(10000);
+      vi.advanceTimersByTime(10000);
     });
 
     test('a late response after timeout is ignored', async () => {
       const resultPromise = socketProxy.emitWithAck('test-event');
       const id = lastAckId();
 
-      jest.advanceTimersByTime(10000);
+      vi.advanceTimersByTime(10000);
       await expect(resultPromise).rejects.toThrow('timed out');
 
       expect(() => respond({ id, response: 'late' })).not.toThrow();

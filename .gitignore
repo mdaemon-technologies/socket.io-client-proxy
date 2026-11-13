@@ -101,3 +101,8 @@ typings/
 
 # TernJS port file
 .tern-port
+
+#AI
+claude.md
+
+release

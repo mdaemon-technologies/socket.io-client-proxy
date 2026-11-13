@@ -1,6 +1,6 @@
 import SocketIOProxy from '../socket-io-proxy';
 import { io } from 'socket.io-client';
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, test, expect, beforeEach, afterEach } from 'vitest';
 import {
   Harness,
   installFakes,
@@ -16,7 +16,7 @@ import {
   connectionState,
 } from './helpers/harness';
 
-jest.mock('socket.io-client');
+vi.mock('socket.io-client');
 
 describe('election, failover and teardown', () => {
   let h: Harness;
@@ -61,7 +61,7 @@ describe('election, failover and teardown', () => {
       await electAsPrimary(socketProxy);
 
       h.mockChannel.postMessage.mockClear();
-      jest.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(3000);
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           type: 'HEARTBEAT', data: { tabId: tabIdOf(socketProxy), epoch: epochOf(socketProxy) },
@@ -74,7 +74,7 @@ describe('election, failover and teardown', () => {
       await electAsPrimary(customProxy);
 
       h.mockChannel.postMessage.mockClear();
-      jest.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(1000);
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'HEARTBEAT' })
       );
@@ -89,8 +89,8 @@ describe('election, failover and teardown', () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
       expect(socketProxy.isPrimary).toBe(false);
 
-      jest.advanceTimersByTime(13000);
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(13000);
+      vi.advanceTimersByTime(2000);
       expect(socketProxy.isPrimary).toBe(true);
     });
 
@@ -99,7 +99,7 @@ describe('election, failover and teardown', () => {
 
       // A heartbeat every 5s keeps the 10s timeout from ever elapsing.
       for (let i = 0; i < 6; i++) {
-        jest.advanceTimersByTime(5000);
+        vi.advanceTimersByTime(5000);
         h.mockChannel.onmessage(heartbeat(socketProxy));
       }
 
@@ -109,11 +109,11 @@ describe('election, failover and teardown', () => {
     test('traffic is still handled while a re-election is pending', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('during-election', callback);
 
       // Push past the heartbeat timeout so an election is in flight...
-      jest.advanceTimersByTime(13000);
+      vi.advanceTimersByTime(13000);
       expect(socketProxy.isPrimary).toBe(false);
 
       // ...and confirm ordinary messages are not dropped meanwhile.
@@ -128,13 +128,13 @@ describe('election, failover and teardown', () => {
       // election promise nobody awaits would surface as an unhandled rejection.
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      const onError = jest.fn();
+      const onError = vi.fn();
       socketProxy.on(SocketIOProxy.PROXY_ERROR_EVENT, onError);
       h.mockChannel.postMessage.mockImplementation(() => {
         throw new Error('InvalidStateError');
       });
 
-      expect(() => jest.advanceTimersByTime(13000)).not.toThrow();
+      expect(() => vi.advanceTimersByTime(13000)).not.toThrow();
       expect(onError).toHaveBeenCalledWith(
         expect.objectContaining({ message: 'InvalidStateError' }),
         expect.stringContaining('PRIMARY_CHECK')
@@ -142,17 +142,17 @@ describe('election, failover and teardown', () => {
 
       // The check never went out, so the fallback must still apply: this tab
       // promotes itself when the election times out.
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       expect(socketProxy.isPrimary).toBe(true);
     });
 
     test('an in-flight election is abandoned when a primary announces itself', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      jest.advanceTimersByTime(13000);
+      vi.advanceTimersByTime(13000);
       h.mockChannel.onmessage(primaryAlive(socketProxy, { connected: true, active: true, id: 'live' }));
 
-      jest.advanceTimersByTime(5000);
+      vi.advanceTimersByTime(5000);
       expect(socketProxy.isPrimary).toBe(false);
       expect(socketProxy.id).toBe('live');
     });
@@ -238,7 +238,7 @@ describe('election, failover and teardown', () => {
     });
 
     test('demotion keeps listeners registered while primary', () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('kept', callback);
 
       h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
@@ -265,7 +265,7 @@ describe('election, failover and teardown', () => {
       h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
       expect(socketProxy.isPrimary).toBe(false);
 
-      const local = jest.fn();
+      const local = vi.fn();
       socketProxy.on('zombie', local);
       h.mockChannel.postMessage.mockClear();
 
@@ -307,7 +307,7 @@ describe('election, failover and teardown', () => {
       );
 
       expect(socketProxy.isPrimary).toBe(false);
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await promise;
 
       expect(socketProxy.isPrimary).toBe(true);
@@ -332,7 +332,7 @@ describe('election, failover and teardown', () => {
       }));
       expect(socketProxy.isPrimary).toBe(false);
 
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await promise;
       expect(socketProxy.isPrimary).toBe(true);
     });
@@ -346,18 +346,18 @@ describe('election, failover and teardown', () => {
         .filter((m: any) => m.type === 'PRIMARY_DEMAND');
       expect(demands).toHaveLength(1);
 
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await Promise.all([a, b]);
       expect(socketProxy.isPrimary).toBe(true);
       expect(io).toHaveBeenCalledTimes(1);
     });
 
     test('listeners registered before promotion still fire afterwards', async () => {
-      const callback = jest.fn();
+      const callback = vi.fn();
       socketProxy.on('kept', callback);
 
       const promise = socketProxy.forcePrimary();
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await promise;
 
       const onAnyHandler = h.mockSocket.onAny.mock.calls[0][0] as (...args: any[]) => void;
@@ -369,7 +369,7 @@ describe('election, failover and teardown', () => {
       // The whole point of the epoch: tabId alone would let the stale tab win
       // the tie-break and undo the forced promotion.
       const promise = socketProxy.forcePrimary();
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       await promise;
       expect(socketProxy.isPrimary).toBe(true);
 
@@ -407,7 +407,7 @@ describe('election, failover and teardown', () => {
       h.mockChannel.postMessage.mockClear();
 
       // It waits out the heartbeat timeout like any other secondary.
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       expect(socketProxy.isPrimary).toBe(false);
       expect(lastPosted('PRIMARY_CHECK')).toBeUndefined();
     });
@@ -450,7 +450,7 @@ describe('election, failover and teardown', () => {
       }));
 
       // Only the election delay, not the full heartbeatTimeout.
-      jest.advanceTimersByTime(2000);
+      vi.advanceTimersByTime(2000);
       expect(socketProxy.isPrimary).toBe(true);
     });
 
@@ -546,9 +546,9 @@ describe('election, failover and teardown', () => {
 
     test('releases listeners and subscribers', async () => {
       await electAsPrimary(socketProxy);
-      socketProxy.on('x', jest.fn());
-      socketProxy.onProxyMessage('y', jest.fn());
-      socketProxy.onPrimaryCheck(jest.fn());
+      socketProxy.on('x', vi.fn());
+      socketProxy.onProxyMessage('y', vi.fn());
+      socketProxy.onPrimaryCheck(vi.fn());
 
       socketProxy.closeChannel();
 

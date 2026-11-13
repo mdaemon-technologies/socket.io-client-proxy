@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-11-13
+
+Tooling only: no change to the API, the behaviour, the inter-tab protocol or
+the package's file names and `exports`. The bundles are rebuilt by a different
+bundler, so their bytes differ; the type declarations are identical.
+
+### Changed
+
+- **The bundles are built with Vite (library mode) instead of Rollup.** The ES
+  module, the `<script>` UMD build and the `require()` UMD build keep their
+  names, their ES2020 target and their minification, `socket.io-client` stays
+  external (the global `io` for the `<script>` build) and `@mdaemon/validate`
+  stays bundled. Declarations now come from plain `tsc --emitDeclarationOnly`.
+- **The tests run on Vitest instead of Jest.** The `--stack-size=2000`
+  workaround Jest needed is gone, and so is the `structuredClone` shim: Vitest
+  keeps Node's, which rejects uncloneable payloads as a browser does. Vitest
+  does not type-check, so `npm run typecheck` now checks the specs.
+- **The package is smoke-tested on Node 18 and 20.** The toolchain needs Node
+  22.22.2, so CI builds and tests on Node 22, 24 and 26, then runs `test:smoke`
+  (`smoke/`, plain `node:test`) on Node 18 and 20 against the Node 26 bundles: each
+  bundle must load through the `exports` map or as a `<script>`, and two
+  proxies must elect a primary and exchange messages over Node's real
+  `BroadcastChannel`. `publish.yml` publishes the same `dist/` it tested.
+- **TypeScript 7 (the native compiler) replaces TypeScript 6.** It emits the
+  declarations and runs `npm run typecheck`; the declarations it writes are
+  byte-identical to TypeScript 6's, and no `tsconfig` change was needed.
+
 ## [1.2.0] - 2026-08-26
 
 Adds deterministic promotion, reconnection-event forwarding, peer-notifying

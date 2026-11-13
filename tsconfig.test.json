@@ -1,0 +1,13 @@
+{
+  // Type-checks the specs and the tool configs, which tsconfig.json leaves out
+  // because it also drives the declaration build. Vitest strips types without
+  // checking them, so `npm run typecheck` is what catches errors here.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false
+  },
+  "include": ["src/**/*", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
+}

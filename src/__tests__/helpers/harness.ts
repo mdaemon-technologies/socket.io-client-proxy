@@ -1,4 +1,4 @@
-import { jest } from '@jest/globals';
+import { vi, type Mock } from 'vitest';
 import { io } from 'socket.io-client';
 import SocketIOProxy from '../../socket-io-proxy';
 
@@ -10,16 +10,10 @@ import SocketIOProxy from '../../socket-io-proxy';
  * properties while the real library rejects it, which hid a bug where every
  * SOCKET_ID_UPDATE sent after a disconnect was silently discarded.
  *
- * NOTE: `npm test` runs jest with `--stack-size=2000`. jest's own frames are
- * large, and the layered fake timers, spies and module mocks below put
- * `expect().toThrow()` close enough to V8's default budget that it
- * intermittently raised "Maximum call stack size exceeded" — deterministically
- * so under `--stack-size=800`, on the committed 1.1.0 tree as well as this one.
- * The bump restores headroom; it is not hiding a recursion bug.
- *
- * NOTE: the specs are split across several files on purpose. Registering
- * roughly ninety or more tests in a single file overflows the stack the same
- * way, and even `expect(1).toBe(1)` then fails.
+ * NOTE: the specs are split across several files by area. Under Jest, roughly
+ * ninety or more tests in one file overflowed the stack in jest's failure
+ * formatting, which needed `--stack-size=2000`. Vitest does not need that, but
+ * the split is kept: add new specs to the file that matches their area.
  */
 
 export type AnySocket = any;
@@ -39,27 +33,27 @@ export function makeMockSocket(
   const id = overrides.id ?? 'test-socket-id';
 
   const socket: AnySocket = {
-    emit: jest.fn(),
-    emitWithAck: jest.fn<any>().mockResolvedValue(undefined),
-    on: jest.fn(),
-    once: jest.fn(),
-    off: jest.fn(),
-    onAny: jest.fn(),
+    emit: vi.fn(),
+    emitWithAck: vi.fn().mockResolvedValue(undefined),
+    on: vi.fn(),
+    once: vi.fn(),
+    off: vi.fn(),
+    onAny: vi.fn(),
     volatile: {},
-    timeout: jest.fn(),
+    timeout: vi.fn(),
     id: open ? id : undefined,
     connected: open,
     active: open,
-    io: { on: jest.fn(), off: jest.fn() },
+    io: { on: vi.fn(), off: vi.fn() },
   };
 
-  socket.connect = jest.fn(() => {
+  socket.connect = vi.fn(() => {
     socket.connected = true;
     socket.active = true;
     socket.id = id;
     return socket;
   });
-  socket.disconnect = jest.fn(() => {
+  socket.disconnect = vi.fn(() => {
     socket.connected = false;
     socket.active = false;
     socket.id = undefined;
@@ -73,10 +67,10 @@ export function makeMockSocket(
 
 export function makeMockChannel() {
   return {
-    postMessage: jest.fn(),
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-    close: jest.fn(),
+    postMessage: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    close: vi.fn(),
     onmessage: null as any,
   };
 }
@@ -125,12 +119,12 @@ function trackWindowListeners(): void {
 }
 
 export function installFakes(): Harness {
-  jest.useFakeTimers();
+  vi.useFakeTimers();
   trackWindowListeners();
   trackedListeners = [];
 
   // Election jitter is randomised; pin it to zero so timings are exact.
-  jest.spyOn(Math, 'random').mockReturnValue(0);
+  vi.spyOn(Math, 'random').mockReturnValue(0);
 
   let idCounter = 0;
   Object.defineProperty(globalThis, 'crypto', {
@@ -147,12 +141,12 @@ export function installFakes(): Harness {
 
   const mockSocket = makeMockSocket();
   // mockReset clears call history carried over from the previous test in this
-  // file; jest.restoreAllMocks() does not reset module mocks.
-  (io as jest.Mock).mockReset();
+  // file; vi.restoreAllMocks() does not reset module mocks.
+  (io as Mock).mockReset();
   // Always the same socket, so `h.mockSocket` stays the one the proxy holds —
   // but reconfigured per call, so a proxy built with `autoConnect: false` gets
   // a socket that really starts closed.
-  (io as jest.Mock).mockImplementation((...args: unknown[]) => {
+  (io as Mock).mockImplementation((...args: unknown[]) => {
     const open = (args[1] as Record<string, any> | undefined)?.autoConnect !== false;
     mockSocket.connected = open;
     mockSocket.active = open;
@@ -164,18 +158,21 @@ export function installFakes(): Harness {
   // be distinct here, or the lobby's onmessage would clobber the main handler.
   const mockChannel = makeMockChannel();
   const lobbyChannel = makeMockChannel();
-  globalThis.BroadcastChannel = jest.fn().mockImplementation((...args: unknown[]) =>
-    String(args[0] ?? '').endsWith(IDENTITY_LOBBY_SUFFIX) ? lobbyChannel : mockChannel
-  ) as unknown as typeof BroadcastChannel;
+  // A `function`, not an arrow: the proxy calls it with `new`, and Vitest runs
+  // the implementation as the constructor. Returning an object from it makes
+  // `new` yield that object.
+  globalThis.BroadcastChannel = vi.fn().mockImplementation(function (...args: unknown[]) {
+    return String(args[0] ?? '').endsWith(IDENTITY_LOBBY_SUFFIX) ? lobbyChannel : mockChannel;
+  }) as unknown as typeof BroadcastChannel;
 
-  const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
   return { mockSocket, mockChannel, lobbyChannel, warn };
 }
 
 export function restoreFakes(): void {
-  jest.useRealTimers();
-  jest.restoreAllMocks();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 
   // Drop anything a proxy the test left open registered on window.
   trackedListeners.forEach(([type, cb, opts]) => window.removeEventListener(type, cb, opts));
@@ -274,7 +271,7 @@ export function respondAsPrimary(
 /** Drives a proxy to primary by letting the election time out. */
 export async function electAsPrimary(proxy: SocketIOProxy) {
   const promise = proxy.initialize();
-  jest.advanceTimersByTime(2000);
+  vi.advanceTimersByTime(2000);
   await promise;
 }
 
@@ -394,11 +391,12 @@ export function installBus(): BusHarness {
   const bus = new ChannelBus();
   const sockets: AnySocket[] = [];
 
-  globalThis.BroadcastChannel = jest.fn().mockImplementation(
-    (...args: unknown[]) => new FakeChannel(args[0] as string, bus)
-  ) as unknown as typeof BroadcastChannel;
+  // A `function`, not an arrow, for the same reason as in installFakes().
+  globalThis.BroadcastChannel = vi.fn().mockImplementation(function (...args: unknown[]) {
+    return new FakeChannel(args[0] as string, bus);
+  }) as unknown as typeof BroadcastChannel;
 
-  (io as jest.Mock).mockImplementation((...args: unknown[]) => {
+  (io as Mock).mockImplementation((...args: unknown[]) => {
     const socket = makeMockSocket(
       { id: `socket-${sockets.length + 1}` },
       (args[1] as Record<string, any>) ?? {},

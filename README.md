@@ -491,15 +491,16 @@ proxy.directChannelEmit("local-update", { cached: true, data: payload });
 ### Running the tests
 
 ```bash
-npm test
+npm run build        # Vite bundles plus tsc declarations, into dist/
+npm test             # the Vitest suite, in jsdom
+npm run typecheck    # Vitest strips types without checking them; this checks the specs
+npm run test:smoke   # node:test checks that each built bundle loads and works
 ```
 
-Use the script rather than a bare `npx jest`. It runs jest under
-`--stack-size=2000`, and without that roughly two dozen specs fail with
-`RangeError: Maximum call stack size exceeded` — always at an
-`expect().toThrow()`, always with `source-map`'s `doQuickSort` on the stack.
-That is jest formatting a failure against V8's default stack budget, not the
-library misbehaving.
+The build and the Vitest suite need Node 22.22.2, 24.15.0 or 26 and later. The package itself
+supports Node 18, so the smoke tests are plain JavaScript with no dev
+dependencies, and CI runs them on Node 18 and 20 against the bundles built on
+a newer Node.
 
 ## Changelog
 

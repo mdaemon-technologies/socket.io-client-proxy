@@ -1,5 +1,5 @@
 import SocketIOProxy from '../socket-io-proxy';
-import { jest, describe, test, expect, beforeEach, afterEach } from '@jest/globals';
+import { vi, describe, test, expect, beforeEach, afterEach } from 'vitest';
 import {
   AnySocket,
   BusHarness,
@@ -10,7 +10,7 @@ import {
   electAsPrimary,
 } from './helpers/harness';
 
-jest.mock('socket.io-client');
+vi.mock('socket.io-client');
 
 /**
  * These specs run several proxies against a BroadcastChannel bus that really
@@ -62,7 +62,7 @@ describe('multi-tab behaviour', () => {
       const c = makeTab();
 
       const promises = [a.initialize(), b.initialize(), c.initialize()];
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await Promise.all(promises);
 
       expect(livePrimaries(a, b, c)).toHaveLength(1);
@@ -76,7 +76,7 @@ describe('multi-tab behaviour', () => {
       // this is the split brain that a per-tab token made unrecoverable.
       bus.pause();
       const promises = [a.initialize(), b.initialize()];
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await Promise.all(promises);
 
       expect(a.isPrimary).toBe(true);
@@ -98,14 +98,14 @@ describe('multi-tab behaviour', () => {
 
       bus.pause();
       const promises = [a.initialize(), b.initialize()];
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await Promise.all(promises);
       bus.flush();
 
       const winner = a.isPrimary ? a : b;
       const loser = a.isPrimary ? b : a;
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       loser.on('news', callback);
 
       onAnyOf(winner)('news', 'from the winner');
@@ -118,14 +118,14 @@ describe('multi-tab behaviour', () => {
 
       bus.pause();
       const promises = [a.initialize(), b.initialize()];
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await Promise.all(promises);
 
       // Drop the buffered claims entirely, leaving only heartbeats to recover.
       bus.discard();
       expect(livePrimaries(a, b)).toHaveLength(2);
 
-      jest.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(3000);
       expect(livePrimaries(a, b)).toHaveLength(1);
     });
   });
@@ -139,7 +139,7 @@ describe('multi-tab behaviour', () => {
       expect(livePrimaries(a, b, c)).toEqual([a]);
 
       const promise = c.forcePrimary();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await promise;
 
       expect(livePrimaries(a, b, c)).toEqual([c]);
@@ -147,8 +147,8 @@ describe('multi-tab behaviour', () => {
       expect(sockets.filter(s => !s.disconnect.mock.calls.length)).toHaveLength(1);
 
       // ...and the other two still receive relayed events.
-      const onA = jest.fn();
-      const onB = jest.fn();
+      const onA = vi.fn();
+      const onB = vi.fn();
       a.on('relayed', onA);
       b.on('relayed', onB);
       onAnyOf(c)('relayed', 'payload');
@@ -165,7 +165,7 @@ describe('multi-tab behaviour', () => {
       for (let i = 0; i < 10; i++) {
         const target = tabs[i % 3];
         const promise = target.forcePrimary();
-        jest.advanceTimersByTime(2500);
+        vi.advanceTimersByTime(2500);
         await promise;
 
         expect(livePrimaries(...tabs)).toEqual([target]);
@@ -184,7 +184,7 @@ describe('multi-tab behaviour', () => {
       // tabId-only tie-break the other would have claimed it straight back.
       const demander = tabIdOf(a) < tabIdOf(b) ? a : b;
       const promise = demander.forcePrimary();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await promise;
 
       expect(livePrimaries(a, b)).toEqual([demander]);
@@ -196,11 +196,11 @@ describe('multi-tab behaviour', () => {
       await electAsPrimary(a);
       await b.initialize();
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       b.on('after-promotion', callback);
 
       const promise = b.forcePrimary();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await promise;
 
       onAnyOf(b)('after-promotion', 'ok');
@@ -219,7 +219,7 @@ describe('multi-tab behaviour', () => {
 
       primary.closeChannel();
 
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       expect(secondary.isPrimary).toBe(true);
       expect(sockets).toHaveLength(2);
     });
@@ -235,8 +235,8 @@ describe('multi-tab behaviour', () => {
       (primary as any).stopHeartbeat();
       (primary as any).channel.close();
 
-      jest.advanceTimersByTime(13000);
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(13000);
+      vi.advanceTimersByTime(2500);
       expect(secondary.isPrimary).toBe(true);
     });
 
@@ -251,7 +251,7 @@ describe('multi-tab behaviour', () => {
       expect(livePrimaries(...secondaries)).toHaveLength(0);
 
       primary.closeChannel();
-      jest.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(3000);
 
       expect(livePrimaries(...secondaries)).toHaveLength(1);
     });
@@ -266,14 +266,14 @@ describe('multi-tab behaviour', () => {
       await b.initialize();
 
       primary.closeChannel();
-      jest.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(3000);
 
       const winner = [a, b].find(t => t.isPrimary)!;
       const follower = winner === a ? b : a;
       expect(winner).toBeDefined();
       expect(follower.isPrimary).toBe(false);
 
-      const callback = jest.fn();
+      const callback = vi.fn();
       follower.on('after-failover', callback);
       onAnyOf(winner)('after-failover', 'ok');
 
@@ -306,7 +306,7 @@ describe('multi-tab behaviour', () => {
     /** Announced departure, then long enough for the election to settle. */
     function killPrimary(primary: SocketIOProxy) {
       primary.closeChannel();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
     }
 
     test('nothing opens the socket until the consumer asks', async () => {
@@ -365,8 +365,8 @@ describe('multi-tab behaviour', () => {
       // No PRIMARY_LEAVING at all: the heartbeat monitor drives this one.
       (primary as any).stopHeartbeat();
       (primary as any).channel.close();
-      jest.advanceTimersByTime(13000);
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(13000);
+      vi.advanceTimersByTime(2500);
 
       expect(secondary.isPrimary).toBe(true);
       expect(sockets[1].connect).toHaveBeenCalled();
@@ -377,7 +377,7 @@ describe('multi-tab behaviour', () => {
       primary.connect();
 
       const promise = secondary.forcePrimary();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await promise;
 
       expect(secondary.isPrimary).toBe(true);
@@ -423,11 +423,11 @@ describe('multi-tab behaviour', () => {
       // secondary takes over, then hands back to a third tab, then takes over
       // again — intent must not be lost anywhere along the way.
       const first = secondary.forcePrimary();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await first;
 
       const back = primary.forcePrimary();
-      jest.advanceTimersByTime(2500);
+      vi.advanceTimersByTime(2500);
       await back;
 
       expect(primary.isPrimary).toBe(true);
@@ -453,7 +453,7 @@ describe('multi-tab behaviour', () => {
     });
 
     test('socket events reach every tab', () => {
-      const onSecondary = jest.fn();
+      const onSecondary = vi.fn();
       secondary.on('news', onSecondary);
 
       onAnyOf(primary)('news', 'broadcast');
@@ -464,7 +464,7 @@ describe('multi-tab behaviour', () => {
       sockets[0].emitWithAck.mockResolvedValue({ ok: true });
 
       const promise = secondary.emitWithAck('req', 1);
-      await jest.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
 
       await expect(promise).resolves.toEqual({ ok: true });
     });
@@ -474,12 +474,12 @@ describe('multi-tab behaviour', () => {
 
       const promise = secondary.emitWithAck('req', 1);
       const assertion = expect(promise).rejects.toThrow('operation has timed out');
-      await jest.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(0);
       await assertion;
     });
 
     test('sendMessageToPrimary reaches the primary subscriber', () => {
-      const subscriber = jest.fn();
+      const subscriber = vi.fn();
       primary.onProxyMessage('sync', subscriber);
 
       secondary.sendMessageToPrimary({ eventName: 'sync', message: { key: 'prefs' } });
@@ -488,8 +488,8 @@ describe('multi-tab behaviour', () => {
 
     test('peers().emit reaches the server once and the sibling tab, not the sender', () => {
       // The spec's acceptance criterion for A3, and the subtlest of them.
-      const onPrimary = jest.fn();
-      const onSecondary = jest.fn();
+      const onPrimary = vi.fn();
+      const onSecondary = vi.fn();
       primary.on('leave-room', onPrimary);
       secondary.on('leave-room', onSecondary);
 
@@ -504,8 +504,8 @@ describe('multi-tab behaviour', () => {
 
     test('reconnect_failed fires exactly once in every tab', () => {
       // The spec's acceptance criterion for A2.
-      const onPrimary = jest.fn();
-      const onSecondary = jest.fn();
+      const onPrimary = vi.fn();
+      const onSecondary = vi.fn();
       primary.on('reconnect_failed', onPrimary);
       secondary.on('reconnect_failed', onSecondary);
 
@@ -518,8 +518,8 @@ describe('multi-tab behaviour', () => {
     });
 
     test('directChannelEmit reaches the other tabs but not the sender', () => {
-      const onPrimary = jest.fn();
-      const onSecondary = jest.fn();
+      const onPrimary = vi.fn();
+      const onSecondary = vi.fn();
       primary.on('local-update', onPrimary);
       secondary.on('local-update', onSecondary);
 
@@ -534,10 +534,10 @@ describe('multi-tab behaviour', () => {
       // never announce, and secondaries learn about it by subscribing.
       const second = makeTab();
       void second.initialize();
-      jest.advanceTimersByTime(0);
+      vi.advanceTimersByTime(0);
 
-      const onSecondary = jest.fn();
-      const onSecond = jest.fn();
+      const onSecondary = vi.fn();
+      const onSecond = vi.fn();
       secondary.on(SocketIOProxy.CONNECTION_STATE_EVENT, onSecondary);
       second.on(SocketIOProxy.CONNECTION_STATE_EVENT, onSecond);
 
@@ -560,7 +560,7 @@ describe('multi-tab behaviour', () => {
     });
 
     test('a secondary sees the primary disconnect and cleared id', () => {
-      const onDisconnect = jest.fn();
+      const onDisconnect = vi.fn();
       secondary.on('disconnect', onDisconnect);
 
       sockets[0].id = undefined;
@@ -596,7 +596,7 @@ describe('multi-tab behaviour', () => {
       const foreign = makeTab('app', { auth: { token: 'user-b' } });
       await electAsPrimary(foreign);
 
-      const leaked = jest.fn();
+      const leaked = vi.fn();
       foreign.on('secret', leaked);
 
       onAnyOf(primary)('secret', 'user-a data');
@@ -654,7 +654,7 @@ describe('multi-tab behaviour', () => {
     test('tabs on unrelated channel ids ignore each other', () => {
       const a = makeTab('app-one');
       const b = makeTab('app-two');
-      const callback = jest.fn();
+      const callback = vi.fn();
       b.on('x', callback);
 
       a.directChannelEmit('x', 1);
