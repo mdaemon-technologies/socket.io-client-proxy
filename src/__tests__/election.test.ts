@@ -1,6 +1,8 @@
 import SocketIOProxy from '../socket-io-proxy';
 import { io } from 'socket.io-client';
 import { vi, describe, test, expect, beforeEach, afterEach } from 'vitest';
+import { LocalEmitter } from '../events/local-emitter';
+import { KeyedSubscribers, SubscriberSet } from '../events/subscribers';
 import {
   Harness,
   installFakes,
@@ -12,8 +14,9 @@ import {
   primaryAlive,
   primaryClaim,
   heartbeat,
-  epochOf,
+  FIRST_EPOCH,
   connectionState,
+  socketHandler,
 } from './helpers/harness';
 
 vi.mock('socket.io-client');
@@ -64,7 +67,7 @@ describe('election, failover and teardown', () => {
       vi.advanceTimersByTime(3000);
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: 'HEARTBEAT', data: { tabId: tabIdOf(socketProxy), epoch: epochOf(socketProxy) },
+          type: 'HEARTBEAT', data: { tabId: tabIdOf(socketProxy), epoch: FIRST_EPOCH },
         })
       );
     });
@@ -82,7 +85,12 @@ describe('election, failover and teardown', () => {
 
     test('a secondary starts a heartbeat monitor after the election', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
-      expect((socketProxy as any).heartbeatMonitorTimer).not.toBeNull();
+
+      // Silence past heartbeatTimeout is noticed, which only a running monitor does.
+      vi.advanceTimersByTime(13000);
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'PRIMARY_CHECK' })
+      );
     });
 
     test('a secondary re-elects when the heartbeat is lost', async () => {
@@ -166,7 +174,7 @@ describe('election, failover and teardown', () => {
     test('broadcasts PRIMARY_CLAIM on becoming primary', () => {
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: 'PRIMARY_CLAIM', data: { tabId: tabIdOf(socketProxy), epoch: epochOf(socketProxy) },
+          type: 'PRIMARY_CLAIM', data: { tabId: tabIdOf(socketProxy), epoch: FIRST_EPOCH },
         })
       );
     });
@@ -174,17 +182,17 @@ describe('election, failover and teardown', () => {
     test('yields to a higher tabId on PRIMARY_CLAIM', () => {
       expect(socketProxy.isPrimary).toBe(true);
 
-      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH }));
       expect(socketProxy.isPrimary).toBe(false);
       expect(h.mockSocket.disconnect).toHaveBeenCalled();
     });
 
     test('sends a targeted PRIMARY_YIELD to a lower tabId', () => {
-      (socketProxy as any).tabId = 'zz'.repeat(24);
       h.mockChannel.postMessage.mockClear();
 
+      // The lowest possible tabId, so this tab outranks it.
       const lowerTabId = '00'.repeat(24);
-      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: lowerTabId, epoch: epochOf(socketProxy) }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: lowerTabId, epoch: FIRST_EPOCH }));
 
       expect(socketProxy.isPrimary).toBe(true);
       expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
@@ -210,26 +218,26 @@ describe('election, failover and teardown', () => {
     test('a heartbeat from another primary triggers reconciliation', () => {
       // Backstop in case a PRIMARY_CLAIM is missed: the next heartbeat resolves it.
       h.mockChannel.onmessage(heartbeat(socketProxy, {
-        tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy),
+        tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH,
       }));
       expect(socketProxy.isPrimary).toBe(false);
     });
 
     test('a PRIMARY_ALIVE from another primary triggers reconciliation', () => {
       h.mockChannel.onmessage(primaryAlive(socketProxy, {
-        tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy), connected: true, active: true, id: 'x',
+        tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH, connected: true, active: true, id: 'x',
       }));
       expect(socketProxy.isPrimary).toBe(false);
     });
 
     test('a primary that wins reconciliation does not adopt the loser state', () => {
       // Winning the tie-break must not leave this tab reporting a connection
-      // it does not own.
-      (socketProxy as any).tabId = 'zz'.repeat(24);
-      (socketProxy as any).isConnected = true;
+      // it does not own. The peer has the lowest possible tabId, so this tab wins.
+      socketHandler(h.mockSocket, 'connect')();
+      expect(socketProxy.connected).toBe(true);
 
       h.mockChannel.onmessage(primaryAlive(socketProxy, {
-        tabId: '00'.repeat(24), epoch: epochOf(socketProxy), connected: false, active: false, id: 'theirs',
+        tabId: '00'.repeat(24), epoch: FIRST_EPOCH, connected: false, active: false, id: 'theirs',
       }));
 
       expect(socketProxy.isPrimary).toBe(true);
@@ -241,7 +249,7 @@ describe('election, failover and teardown', () => {
       const callback = vi.fn();
       socketProxy.on('kept', callback);
 
-      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH }));
       expect(socketProxy.isPrimary).toBe(false);
 
       h.mockChannel.onmessage(msg(socketProxy, { type: 'EVENT', data: { event: 'kept', args: ['still here'] } }));
@@ -249,7 +257,7 @@ describe('election, failover and teardown', () => {
     });
 
     test('a demoted tab still accepts traffic from the winner', () => {
-      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH }));
 
       // The channel tag is shared, so there is no blackout while the demoted
       // tab waits to re-learn a token.
@@ -262,7 +270,7 @@ describe('election, failover and teardown', () => {
       // one this tab let go of must never be relayed as if it still owned it.
       const onAnyHandler = h.mockSocket.onAny.mock.calls[0][0] as (...args: any[]) => void;
 
-      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH }));
       expect(socketProxy.isPrimary).toBe(false);
 
       const local = vi.fn();
@@ -276,9 +284,20 @@ describe('election, failover and teardown', () => {
     });
 
     test('a demoted tab starts monitoring the winner heartbeat', () => {
-      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) }));
-      expect((socketProxy as any).heartbeatMonitorTimer).not.toBeNull();
-      expect((socketProxy as any).heartbeatTimer).toBeNull();
+      h.mockChannel.onmessage(primaryClaim(socketProxy, { tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH }));
+      h.mockChannel.postMessage.mockClear();
+
+      // Its own heartbeat has stopped...
+      vi.advanceTimersByTime(3000);
+      expect(h.mockChannel.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'HEARTBEAT' })
+      );
+
+      // ...and the winner's silence is noticed.
+      vi.advanceTimersByTime(10000);
+      expect(h.mockChannel.postMessage).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'PRIMARY_CHECK' })
+      );
     });
   });
 
@@ -375,7 +394,7 @@ describe('election, failover and teardown', () => {
 
       h.mockChannel.postMessage.mockClear();
       h.mockChannel.onmessage(primaryClaim(socketProxy, {
-        tabId: 'zz'.repeat(24), epoch: epochOf(socketProxy) - 1,
+        tabId: 'zz'.repeat(24), epoch: FIRST_EPOCH - 1,
       }));
 
       expect(socketProxy.isPrimary).toBe(true);
@@ -494,8 +513,16 @@ describe('election, failover and teardown', () => {
       await electAsPrimary(socketProxy);
 
       socketProxy.closeChannel();
-      expect((socketProxy as any).heartbeatTimer).toBeNull();
-      expect((socketProxy as any).heartbeatMonitorTimer).toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    test('stops every timer on a secondary with an ack in flight', async () => {
+      await joinAsSecondary(h.mockChannel, socketProxy);
+      socketProxy.emitWithAck('slow').catch(() => {});
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+      socketProxy.closeChannel();
+      expect(vi.getTimerCount()).toBe(0);
     });
 
     test('clears primary state so later calls cannot post on a closed channel', async () => {
@@ -545,6 +572,12 @@ describe('election, failover and teardown', () => {
     });
 
     test('releases listeners and subscribers', async () => {
+      // That clear() really empties each store is covered in parts.test.ts.
+      const cleared = [
+        vi.spyOn(LocalEmitter.prototype, 'clear'),
+        vi.spyOn(KeyedSubscribers.prototype, 'clear'),
+        vi.spyOn(SubscriberSet.prototype, 'clear'),
+      ];
       await electAsPrimary(socketProxy);
       socketProxy.on('x', vi.fn());
       socketProxy.onProxyMessage('y', vi.fn());
@@ -552,9 +585,7 @@ describe('election, failover and teardown', () => {
 
       socketProxy.closeChannel();
 
-      expect((socketProxy as any).listeners.size).toBe(0);
-      expect((socketProxy as any).messageSubscribers.size).toBe(0);
-      expect((socketProxy as any).primaryCheckSubscribers.size).toBe(0);
+      cleared.forEach((spy) => expect(spy).toHaveBeenCalledTimes(1));
       expect(socketProxy.id).toBeUndefined();
     });
 

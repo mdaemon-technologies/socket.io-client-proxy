@@ -6,6 +6,7 @@ import {
   installFakes,
   restoreFakes,
   getToken,
+  tabIdOf,
   electAsPrimary,
   joinAsSecondary,
   respondAsPrimary,
@@ -195,7 +196,7 @@ describe('construction and initialization', () => {
 
     test('stays silent for a peer with the same identity', () => {
       const proxy = new SocketIOProxy('rtc', 'ws://host', { auth: { user: 'u', token: 't' } });
-      const fingerprint = (proxy as any).identityFingerprint;
+      const fingerprint = proxy.channelName.split('#')[1];
       h.lobbyChannel.onmessage(announce(['auth.token', 'auth.user', 'url'], fingerprint));
 
       expect(h.warn).not.toHaveBeenCalled();
@@ -235,7 +236,7 @@ describe('construction and initialization', () => {
       h.lobbyChannel.postMessage.mockClear();
 
       h.lobbyChannel.onmessage({
-        data: { kind: 'announce', tabId: (proxy as any).tabId, fingerprint: 'x', keys: [] },
+        data: { kind: 'announce', tabId: tabIdOf(proxy), fingerprint: 'x', keys: [] },
       });
       expect(h.warn).not.toHaveBeenCalled();
       expect(h.lobbyChannel.postMessage).not.toHaveBeenCalled();
@@ -541,7 +542,7 @@ describe('construction and initialization', () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
       expect(socketProxy.active).toBe(false);
-      (socketProxy as any).socketActive = true;
+      h.mockChannel.onmessage(connectionState(socketProxy, { active: true }));
       expect(socketProxy.active).toBe(true);
     });
 
@@ -551,7 +552,7 @@ describe('construction and initialization', () => {
     });
 
     test('id returns the cached value when secondary', () => {
-      (socketProxy as any).socketId = 'secondary-id';
+      h.mockChannel.onmessage(connectionState(socketProxy, { id: 'secondary-id' }));
       expect(socketProxy.id).toBe('secondary-id');
     });
 

@@ -1,6 +1,8 @@
 import { vi, type Mock } from 'vitest';
 import { io } from 'socket.io-client';
 import SocketIOProxy from '../../socket-io-proxy';
+import { IDENTITY_LOBBY_SUFFIX } from '../../identity/identity';
+import { deriveToken } from '../../protocol/messages';
 
 /**
  * Shared test harness.
@@ -84,8 +86,7 @@ export interface Harness {
   warn: any;
 }
 
-/** Must match IDENTITY_LOBBY_SUFFIX in the proxy. */
-export const IDENTITY_LOBBY_SUFFIX = '::sioproxy-identity';
+export { IDENTITY_LOBBY_SUFFIX };
 
 /**
  * Installs fake timers, a deterministic jitter source, a counter-based crypto
@@ -181,18 +182,22 @@ export function restoreFakes(): void {
 
 // --- introspection -----------------------------------------------------------
 
-/** The proxy derives its channel tag from the channel id; read it off the instance. */
+/** The channel tag, derived the way every tab derives it: from the channel name. */
 export function getToken(proxy: SocketIOProxy): string {
-  return (proxy as any).token;
+  return deriveToken(proxy.channelName);
 }
 
+/**
+ * The tab's id. The one piece of private state the specs still read: it is the
+ * tab's identity, fixed at construction, and the tie-break specs need it to
+ * know which of two real tabs should win.
+ */
 export function tabIdOf(proxy: SocketIOProxy): string {
   return (proxy as any).tabId;
 }
 
-export function listenersFor(proxy: SocketIOProxy, event: string): any[] | undefined {
-  return (proxy as any).listeners.get(event);
-}
+/** The epoch a tab takes when it is elected with no other epoch in sight. */
+export const FIRST_EPOCH = 1;
 
 /** Retrieves a lifecycle handler the primary registered on the socket. */
 export function socketHandler(socket: AnySocket, event: string): (...args: any[]) => void {
@@ -250,11 +255,6 @@ export function connectionState(proxy: SocketIOProxy, overrides: Record<string, 
   });
 }
 
-/** The epoch a proxy currently holds; 0 when it is not the primary. */
-export function epochOf(proxy: SocketIOProxy): number {
-  return (proxy as any).epoch;
-}
-
 /** Answers the proxy's PRIMARY_CHECK so it settles as a secondary. */
 export function respondAsPrimary(
   channel: ReturnType<typeof makeMockChannel>,
@@ -298,12 +298,40 @@ export async function joinAsSecondary(
  */
 export class ChannelBus {
   public channels: FakeChannel[] = [];
+  /** Every channel ever opened, in order, closed ones included. */
+  public opened: FakeChannel[] = [];
   public paused = false;
   public queue: { from: FakeChannel; data: any }[] = [];
 
   register(channel: FakeChannel) {
     this.channels.push(channel);
+    this.opened.push(channel);
   }
+
+  /**
+   * Builds a proxy and remembers the channels it opened, so that
+   * {@link killSilently} can later cut it off.
+   */
+  track(create: () => SocketIOProxy): SocketIOProxy {
+    const from = this.opened.length;
+    const proxy = create();
+    this.owned.set(proxy, this.opened.slice(from));
+    return proxy;
+  }
+
+  /**
+   * Simulates a tab that dies without a word: its channels close, so nothing
+   * it sends — heartbeats included — reaches anyone, and it hears nothing.
+   */
+  killSilently(proxy: SocketIOProxy) {
+    const channels = this.owned.get(proxy);
+    if (!channels) {
+      throw new Error('killSilently needs a proxy built through bus.track()');
+    }
+    channels.forEach(c => c.close());
+  }
+
+  private owned = new Map<SocketIOProxy, FakeChannel[]>();
 
   unregister(channel: FakeChannel) {
     this.channels = this.channels.filter(c => c !== channel);

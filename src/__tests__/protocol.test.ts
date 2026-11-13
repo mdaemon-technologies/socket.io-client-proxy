@@ -184,7 +184,8 @@ describe('wire protocol', () => {
 
     test('a peer accepts the sentinel and clears its cached id', () => {
       const peer = new SocketIOProxy('test-channel', 'ws://test-url');
-      (peer as any).socketId = 'stale-id';
+      h.mockChannel.onmessage(connectionState(peer, { id: 'stale-id' }));
+      expect(peer.id).toBe('stale-id');
       h.mockChannel.onmessage(connectionState(peer, { connected: false, active: false, id: '' }));
       expect(peer.id).toBeUndefined();
     });
@@ -504,7 +505,7 @@ describe('wire protocol', () => {
     test('ignores a message type that is not part of the protocol', () => {
       // GET_SOCKET_ID / SOCKET_ID_RESPONSE were a request/response pair that
       // nothing ever sent; they are gone, and must now be rejected outright.
-      (socketProxy as any).socketId = 'unchanged';
+      h.mockChannel.onmessage(connectionState(socketProxy, { id: 'unchanged' }));
       h.mockChannel.onmessage(msg(socketProxy, {
         type: 'SOCKET_ID_RESPONSE', data: { id: 'answered-id' },
       }));
@@ -622,10 +623,13 @@ describe('wire protocol', () => {
     });
 
     test('rejects CONNECTION_STATE with a non-string id', () => {
-      (socketProxy as any).socketId = 'unchanged';
-      (socketProxy as any).isPrimary = false;
+      // A secondary, whose id is the cached one. Built last, so the shared
+      // mock channel now delivers to it.
+      const peer = new SocketIOProxy('test-channel', 'ws://test-url');
+      h.mockChannel.onmessage(connectionState(peer, { id: 'unchanged' }));
+
       bad({ type: 'CONNECTION_STATE', data: { connected: true, active: true, id: 42 } });
-      expect(socketProxy.id).toBe('unchanged');
+      expect(peer.id).toBe('unchanged');
     });
 
     test('rejects HEARTBEAT and PRIMARY_CLAIM with no tabId', () => {

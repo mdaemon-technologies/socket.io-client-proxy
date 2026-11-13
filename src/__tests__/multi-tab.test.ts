@@ -30,15 +30,18 @@ describe('multi-tab behaviour', () => {
   afterEach(restoreFakes);
 
   function makeTab(id = 'shared', options = {}) {
-    return new SocketIOProxy(id, 'ws://test-url', options);
+    return bus.track(() => new SocketIOProxy(id, 'ws://test-url', options));
   }
 
   function livePrimaries(...tabs: SocketIOProxy[]) {
     return tabs.filter(t => t.isPrimary);
   }
 
+  /** The onAny handler of the socket a primary holds, found through its public Manager. */
   function onAnyOf(proxy: SocketIOProxy) {
-    return (proxy as any).socket.onAny.mock.calls[0][0] as (...args: any[]) => void;
+    const socket = sockets.find(s => s.io === proxy.io);
+    if (!socket) throw new Error('the proxy holds no socket');
+    return socket.onAny.mock.calls[0][0] as (...args: any[]) => void;
   }
 
   describe('election', () => {
@@ -232,8 +235,7 @@ describe('multi-tab behaviour', () => {
       await secondary.initialize();
 
       // Kill the primary without any announcement.
-      (primary as any).stopHeartbeat();
-      (primary as any).channel.close();
+      bus.killSilently(primary);
 
       vi.advanceTimersByTime(13000);
       vi.advanceTimersByTime(2500);
@@ -363,8 +365,7 @@ describe('multi-tab behaviour', () => {
       primary.connect();
 
       // No PRIMARY_LEAVING at all: the heartbeat monitor drives this one.
-      (primary as any).stopHeartbeat();
-      (primary as any).channel.close();
+      bus.killSilently(primary);
       vi.advanceTimersByTime(13000);
       vi.advanceTimersByTime(2500);
 

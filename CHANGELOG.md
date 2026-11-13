@@ -7,12 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.2] - 2026-11-13
 
-Tooling only: no change to the API, the behaviour, the inter-tab protocol or
-the package's file names and `exports`. The bundles are rebuilt by a different
-bundler, so their bytes differ; the type declarations are identical.
+Tooling and internal restructuring: no change to the API, the behaviour, the
+inter-tab protocol or the package's entry points and `exports`, so tabs on
+1.2.1 and 1.2.2 share one connection. Scripted multi-tab scenarios produce
+identical traces on 1.2.1's implementation and this one: every channel
+message, socket call, listener call, promise outcome, getter value and
+pending timer. The bundles are rebuilt by a different bundler from
+restructured source, so their bytes differ; the exported types are unchanged.
 
 ### Changed
 
+- **The source is split into modules.** `SocketIOProxy` is now a thin public
+  class wired to separate parts: the channel transport, the primacy
+  coordinator (elections, epochs, heartbeat, departure), the primary's socket,
+  the shared connection state, local listeners, emission flags and acks, and
+  the identity lobby. The bundles keep their names, formats and single default
+  export; they are about 1.3 kB larger minified than 1.2.1's.
+- **The type declarations span several files.** `dist/socket-io-proxy.d.ts`
+  re-exports `SocketIOProxyOptions`, `ConnectionState` and `ProxyMessage` from
+  `dist/types.d.ts`, where they are unchanged, and the class declares the same
+  members as before. `tsc` also writes declarations for the internal modules
+  beside them; those are not part of the API.
 - **The bundles are built with Vite (library mode) instead of Rollup.** The ES
   module, the `<script>` UMD build and the `require()` UMD build keep their
   names, their ES2020 target and their minification, `socket.io-client` stays
@@ -29,8 +44,24 @@ bundler, so their bytes differ; the type declarations are identical.
   proxies must elect a primary and exchange messages over Node's real
   `BroadcastChannel`. `publish.yml` publishes the same `dist/` it tested.
 - **TypeScript 7 (the native compiler) replaces TypeScript 6.** It emits the
-  declarations and runs `npm run typecheck`; the declarations it writes are
-  byte-identical to TypeScript 6's, and no `tsconfig` change was needed.
+  declarations and runs `npm run typecheck`; for the same source it writes
+  byte-identical declarations to TypeScript 6's, and no `tsconfig` change was
+  needed.
+- **New specs pin the behaviour.** `scenarios.test.ts` snapshots the traces
+  above, `parts.test.ts` unit-tests each module with plain fakes, and
+  `public-api.test.ts` pins the public members.
+
+### Fixed
+
+- **The README described some behaviour wrongly.** The code is unchanged; the
+  documentation now matches it:
+  - `directChannelEmit()` reaches the *other* tabs only, not the calling one.
+  - Of two live primaries, the more recently elected (higher epoch) wins, and
+    `tabId` only breaks a tie. This has been so since 1.2.0.
+  - Messages from other tabs that fail validation are dropped silently (logged
+    with `debug`), not reported on `proxy_error`.
+  - `emitWithAck()` rejects its promise rather than throwing at the call site.
+  - `onPrimaryCheck()` fires only on the primary.
 
 ## [1.2.0] - 2026-08-26
 

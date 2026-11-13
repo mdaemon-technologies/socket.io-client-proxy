@@ -356,8 +356,9 @@ describe('emit and emitWithAck', () => {
       const cloneError = new Error('could not be cloned');
       h.mockChannel.postMessage.mockImplementation(() => { throw cloneError; });
 
+      const timersBefore = vi.getTimerCount();
       await expect(socketProxy.emitWithAck('bad', () => {})).rejects.toThrow('could not be cloned');
-      expect((socketProxy as any).pendingAcks.size).toBe(0);
+      expect(vi.getTimerCount()).toBe(timersBefore);
 
       // A leaked timer would fire here and reject an already-settled promise.
       expect(() => vi.advanceTimersByTime(20000)).not.toThrow();

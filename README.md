@@ -113,7 +113,7 @@ console.log("Server replied:", response);
 3. **Events flow** — The primary forwards all socket events to secondaries via BroadcastChannel. Secondaries forward `emit` calls back to the primary.
 4. **Heartbeats** — The primary broadcasts a heartbeat every `heartbeatInterval`. A secondary that goes `heartbeatTimeout` without one starts a fresh election.
 5. **Failover** — A primary that is closing broadcasts `PRIMARY_LEAVING`, so the remaining tabs re-elect immediately instead of waiting out the heartbeat timeout. If it dies without warning, the heartbeat timeout covers it.
-6. **Duplicate resolution** — If two tabs ever end up primary at once (both started in the same instant, or a message was lost), the one with the higher `tabId` keeps the socket and the other stands down. Heartbeats act as a backstop in case the claim itself is lost.
+6. **Duplicate resolution** — If two tabs ever end up primary at once (both started in the same instant, or a message was lost), the more recently elected one keeps the socket and the other stands down. Each promotion takes an *epoch* above every one it has seen, and the higher epoch wins; two tabs promoted in the same instant share an epoch, and the higher `tabId` wins. Heartbeats act as a backstop in case the claim itself is lost.
 
 ## Constructor
 
@@ -152,8 +152,8 @@ Every other option is passed straight through to `socket.io-client`.
 | `initialize()` | `Promise<void>` | Negotiate primary/secondary role and set up listeners |
 | `forcePrimary()` | `Promise<void>` | Take ownership of the socket for this tab, whatever the election says. See [Forcing promotion](#forcing-promotion) |
 | `connectionUpdate()` | `void` | Push this tab's `connected` / `id` / `active` to the other tabs now, firing `connection_state_changed` on each. Primary only; a no-op on a secondary |
-| `connect()` | `void` | Reconnect the socket (primary executes, secondary delegates) |
-| `disconnect()` | `void` | Disconnect the socket |
+| `connect()` | `void` | Open the shared connection, and record that the channel is meant to be up (primary executes, secondary delegates). See [Deferred connections](#deferred-connections) |
+| `disconnect()` | `void` | Close the shared connection, and record that the channel is meant to stay closed |
 | `closeChannel()` | `void` | Tear the proxy down: announce departure, disconnect if primary, reject pending acks and close the channel. Idempotent; the instance is unusable afterwards |
 
 ### Events
@@ -197,10 +197,11 @@ or `emitWithAck()` — and are consumed by it, even if that emission is rejected
 They work the same from a secondary tab: the flags travel with the message and
 the primary applies them.
 
-Errors from a user-driven call (`emit`, `emitWithAck`, `directChannelEmit`,
-`sendMessageToPrimary`) throw at the call site — for example when an argument
-cannot be structured-cloned across tabs. Background protocol traffic never
-throws; it reports on `proxy_error` instead.
+Errors from a user-driven call surface at the call site — for example when an
+argument cannot be structured-cloned across tabs: `emit`, `directChannelEmit`,
+`sendMessageToPrimary`, `connect` and `disconnect` throw, and `emitWithAck`
+rejects its promise. Background protocol traffic never throws; it reports on
+`proxy_error` instead.
 
 ### State (Getters)
 
@@ -225,8 +226,8 @@ comparing two call sites in a test.
 |--------|---------|-------------|
 | `sendMessageToPrimary(message)` | `void` | Send a custom `{ eventName, message }` payload to the primary tab. Called on the primary, it delivers locally |
 | `onProxyMessage(eventName, subscriber)` | `() => void` | Subscribe to custom messages (returns unsubscribe function) |
-| `onPrimaryCheck(callback)` | `() => void` | Subscribe to other tabs checking for a primary (returns unsubscribe function) |
-| `directChannelEmit(event, ...args)` | `void` | Broadcast an EVENT to all tabs including this one, bypassing the socket |
+| `onPrimaryCheck(callback)` | `() => void` | Subscribe to other tabs checking for a primary. Fires only while this tab is the primary, since only the primary answers (returns unsubscribe function) |
+| `directChannelEmit(event, ...args)` | `void` | Broadcast an event to the *other* tabs' `on()` listeners, bypassing the socket. The calling tab does not receive it |
 
 ## Identity isolation
 
@@ -348,7 +349,7 @@ if (proxy.isPrimary) {
   console.log("This tab owns the socket connection");
 }
 
-// Get notified when secondary tabs check in
+// On the primary: get notified when another tab checks in
 proxy.onPrimaryCheck(() => {
   console.log("A new tab connected to the channel");
 });
@@ -456,9 +457,12 @@ you want to notify the other tabs *without* sending to the server at all.
 
 ### Handling Internal Errors
 
-Errors the proxy catches — a listener that throws, a malformed message from
-another tab — are reported on a local `proxy_error` event rather than escaping
-into the BroadcastChannel callback where nothing could catch them.
+Errors the proxy catches — a listener or subscriber that throws, a server event
+or protocol message that cannot be structured-cloned to the other tabs — are
+reported on a local `proxy_error` event rather than escaping into the
+BroadcastChannel callback or socket.io's dispatch loop, where nothing could
+catch them. Messages from other tabs that fail validation are not errors: they
+are dropped, and logged only with `debug` on.
 
 ```ts
 import SocketIOProxy from "@mdaemon/socket.io-client-proxy";
@@ -481,8 +485,8 @@ const proxy = new SocketIOProxy("my-app-channel", "https://my-server.com", {
 ### Direct Channel Broadcasting
 
 ```ts
-// Emit an event to all tabs - including this one - without going through the
-// socket server.
+// Emit an event to every other tab without going through the socket server.
+// This tab does not receive it; call your own handler directly if you need it here too.
 proxy.directChannelEmit("local-update", { cached: true, data: payload });
 ```
 
@@ -501,6 +505,20 @@ The build and the Vitest suite need Node 22.22.2, 24.15.0 or 26 and later. The p
 supports Node 18, so the smoke tests are plain JavaScript with no dev
 dependencies, and CI runs them on Node 18 and 20 against the bundles built on
 a newer Node.
+
+`src/__tests__/scenarios.test.ts` scripts multi-tab sessions and snapshots
+everything observable — channel messages, socket calls, listener calls, promise
+outcomes, getters and pending timers. A changed snapshot is a behaviour change:
+review the diff before updating it with `npx vitest run -u`.
+
+### Source layout
+
+`src/socket-io-proxy.ts` is the public class. It wires together the parts that
+do the work: the channel transport and wire protocol (`src/protocol/`), primary
+election and failover (`src/primacy/`), the primary's socket and the shared
+connection state (`src/connection/`), emission flags and acknowledgements
+(`src/emit/`), local listeners (`src/events/`) and identity isolation
+(`src/identity/`).
 
 ## Changelog
 

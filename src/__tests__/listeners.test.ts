@@ -4,7 +4,6 @@ import {
   Harness,
   installFakes,
   restoreFakes,
-  listenersFor,
   electAsPrimary,
   joinAsSecondary,
   msg,
@@ -39,9 +38,10 @@ describe('listeners and inter-tab messaging', () => {
       const callback = vi.fn();
       socketProxy.on('test-event', callback);
 
-      expect(listenersFor(socketProxy, 'test-event')).toContain(callback);
       // Registering on the socket directly would lose the listener on demotion.
       expect(h.mockSocket.on).not.toHaveBeenCalledWith('test-event', callback);
+      onAnyHandler()('test-event', 'x');
+      expect(callback).toHaveBeenCalledWith('x');
     });
 
     test('primary dispatches socket events to local listeners via onAny', async () => {
@@ -58,7 +58,8 @@ describe('listeners and inter-tab messaging', () => {
 
       const callback = vi.fn();
       socketProxy.on('test-event', callback);
-      expect(listenersFor(socketProxy, 'test-event')).toContain(callback);
+      sendEvent('test-event', 'x');
+      expect(callback).toHaveBeenCalledWith('x');
     });
 
     test('removes a specific listener', async () => {
@@ -70,8 +71,9 @@ describe('listeners and inter-tab messaging', () => {
       socketProxy.on('test-event', callback2);
       socketProxy.off('test-event', callback1);
 
-      expect(listenersFor(socketProxy, 'test-event')).not.toContain(callback1);
-      expect(listenersFor(socketProxy, 'test-event')).toContain(callback2);
+      sendEvent('test-event', 'x');
+      expect(callback1).not.toHaveBeenCalled();
+      expect(callback2).toHaveBeenCalledWith('x');
     });
 
     test('off removes a callback registered while primary', async () => {
@@ -88,9 +90,15 @@ describe('listeners and inter-tab messaging', () => {
     test('off without a callback removes every listener for the event', async () => {
       await joinAsSecondary(h.mockChannel, socketProxy);
 
-      socketProxy.on('test-event', vi.fn());
+      const first = vi.fn();
+      const second = vi.fn();
+      socketProxy.on('test-event', first);
+      socketProxy.on('test-event', second);
       socketProxy.off('test-event');
-      expect(listenersFor(socketProxy, 'test-event')).toBeUndefined();
+
+      sendEvent('test-event', 'x');
+      expect(first).not.toHaveBeenCalled();
+      expect(second).not.toHaveBeenCalled();
     });
 
     test('off is a no-op for an unknown event or callback', () => {
@@ -187,10 +195,12 @@ describe('listeners and inter-tab messaging', () => {
       expect(callback).not.toHaveBeenCalled();
     });
 
-    test('onProxyMessage tolerates prototype-chain event names', () => {
+    test('onProxyMessage tolerates prototype-chain event names', async () => {
+      await electAsPrimary(socketProxy);
       const subscriber = vi.fn();
       socketProxy.onProxyMessage('__proto__', subscriber);
-      (socketProxy as any).publishMessage('__proto__', 'x');
+      // On the primary, sendMessageToPrimary publishes locally.
+      socketProxy.sendMessageToPrimary({ eventName: '__proto__', message: 'x' });
       expect(subscriber).toHaveBeenCalledWith('x');
     });
   });
@@ -231,15 +241,17 @@ describe('listeners and inter-tab messaging', () => {
   });
 
   describe('onProxyMessage / publishMessage', () => {
-    test('subscribes and unsubscribes', () => {
+    test('subscribes and unsubscribes', async () => {
+      await electAsPrimary(socketProxy);
       const subscriber = vi.fn();
       const unsubscribe = socketProxy.onProxyMessage('test-event', subscriber);
 
-      (socketProxy as any).publishMessage('test-event', 'test-data');
+      // On the primary, sendMessageToPrimary publishes locally.
+      socketProxy.sendMessageToPrimary({ eventName: 'test-event', message: 'test-data' });
       expect(subscriber).toHaveBeenCalledWith('test-data');
 
       unsubscribe();
-      (socketProxy as any).publishMessage('test-event', 'new-data');
+      socketProxy.sendMessageToPrimary({ eventName: 'test-event', message: 'new-data' });
       expect(subscriber).toHaveBeenCalledTimes(1);
     });
 
