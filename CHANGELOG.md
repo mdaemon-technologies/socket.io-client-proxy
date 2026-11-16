@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-11-16
+
+A dependency update: no change to the API, the inter-tab protocol or the
+package's entry points and `exports`, so tabs on 1.2.2 and 1.2.3 share one
+connection. The scripted multi-tab scenario traces are identical to 1.2.2's.
+
+### Changed
+
+- **`@mdaemon/validate` ^3.3.6 → ^4.1.0.** It is bundled, and checks the
+  payload of every message received from another tab. The proxy's schemas use
+  only `type`, `required`, `minLength` and `properties`, and messages arrive as
+  structured clones (plain data), so the 4.x changes accept and reject exactly
+  the same messages as before. The error text for a rejected message, logged
+  with `debug`, can differ: a missing required field now reports only
+  `"Value is required"`. The bundles are about 7 kB larger minified (about
+  41.4 kB, up from 34.6 kB), mostly from the library's rewritten validators.
+- **`socket.io-client` ^4.8.3 → ^4.8.4.** It stays external, so the bundles
+  don't contain it; the range now requires 4.8.4 or later.
+
 ## [1.2.2] - 2026-11-13
 
 Tooling and internal restructuring: no change to the API, the behaviour, the
@@ -539,6 +558,8 @@ the upgrade notes below before rolling this out.
 
 - Initial published release.
 
+[1.2.3]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.2.3
+[1.2.2]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.2.2
 [1.2.0]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.2.0
 [1.1.0]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.1.0
 [1.0.1]: https://www.npmjs.com/package/@mdaemon/socket.io-client-proxy/v/1.0.1
